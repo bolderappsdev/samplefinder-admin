@@ -66,7 +66,7 @@ async function listAllDocuments(databases, collectionId) {
     if (cursor) queries.push(Query.cursorAfter(cursor));
     const res = await databases.listDocuments(DATABASE_ID, collectionId, queries);
     all.push(...res.documents);
-    if (res.documents.length < 100) break;
+    if (all.length >= res.total || res.documents.length === 0) break;
     cursor = res.documents[res.documents.length - 1].$id;
   }
   return all;
@@ -77,7 +77,7 @@ async function upsertDocument(databases, collectionId, $id, data) {
     await databases.updateDocument(DATABASE_ID, collectionId, $id, data);
     return 'updated';
   } catch (err) {
-    if (err?.code === 404) {
+    if (Number(err?.code) === 404) {
       await databases.createDocument(DATABASE_ID, collectionId, $id, data);
       return 'created';
     }

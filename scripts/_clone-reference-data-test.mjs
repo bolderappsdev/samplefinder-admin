@@ -31,15 +31,25 @@ for (const forbidden of [
 assert.notEqual(PROD_PROJECT_ID, STAGING_PROJECT_ID);
 
 // 4. assertEnvironmentSafe throws if prod and staging keys are missing.
-delete process.env.APPWRITE_PROD_READ_KEY;
-delete process.env.APPWRITE_STAGING_WRITE_KEY;
-assert.throws(() => assertEnvironmentSafe(), /APPWRITE_PROD_READ_KEY/);
+//    Mutates process.env; restore on the way out.
+const originalProdKey = process.env.APPWRITE_PROD_READ_KEY;
+const originalStagingKey = process.env.APPWRITE_STAGING_WRITE_KEY;
+try {
+  delete process.env.APPWRITE_PROD_READ_KEY;
+  delete process.env.APPWRITE_STAGING_WRITE_KEY;
+  assert.throws(() => assertEnvironmentSafe(), /APPWRITE_PROD_READ_KEY/);
 
-process.env.APPWRITE_PROD_READ_KEY = 'x';
-assert.throws(() => assertEnvironmentSafe(), /APPWRITE_STAGING_WRITE_KEY/);
+  process.env.APPWRITE_PROD_READ_KEY = 'x';
+  assert.throws(() => assertEnvironmentSafe(), /APPWRITE_STAGING_WRITE_KEY/);
 
-process.env.APPWRITE_STAGING_WRITE_KEY = 'x';
-// Should NOT throw now.
-assertEnvironmentSafe();
+  process.env.APPWRITE_STAGING_WRITE_KEY = 'x';
+  // Should NOT throw now.
+  assertEnvironmentSafe();
+} finally {
+  if (originalProdKey === undefined) delete process.env.APPWRITE_PROD_READ_KEY;
+  else process.env.APPWRITE_PROD_READ_KEY = originalProdKey;
+  if (originalStagingKey === undefined) delete process.env.APPWRITE_STAGING_WRITE_KEY;
+  else process.env.APPWRITE_STAGING_WRITE_KEY = originalStagingKey;
+}
 
 console.log('✓ clone-reference-data-to-staging self-checks pass');
