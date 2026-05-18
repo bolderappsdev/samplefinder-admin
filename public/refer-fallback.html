@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Join SampleFinder</title>
+  <meta name="description" content="Download SampleFinder and earn bonus points with a referral code!" />
+
+  <!-- Open Graph for link previews -->
+  <meta property="og:title" content="You've been invited to SampleFinder!" />
+  <meta property="og:description" content="Download SampleFinder and earn 100 bonus points when you sign up with this referral code." />
+  <meta property="og:type" content="website" />
+  <!-- TODO: replace with a hosted 1200×630 branded image -->
+  <!-- <meta property="og:image" content="https://samplefinder.com/wp-content/uploads/referral-og.png" /> -->
+
+  <!-- Quicksand font -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Quicksand:wght@600;700&display=swap" rel="stylesheet" />
+
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: 'Quicksand', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: linear-gradient(
+        135deg,
+        #6C0331 0%,
+        #4B0350 20%,
+        #2A0458 45%,
+        #0F0556 65%,
+        #000047 85%,
+        #080860 100%
+      );
+      color: #fff;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      padding: 32px 24px;
+    }
+
+    .container {
+      max-width: 400px;
+      width: 100%;
+    }
+
+    /* App icon */
+    .logo-wrap {
+      margin: 0 auto 32px;
+    }
+    .logo-wrap img {
+      width: 120px;
+      height: 120px;
+      border-radius: 26px;
+      box-shadow: 0 12px 36px rgba(0, 0, 0, 0.4);
+      display: block;
+      margin: 0 auto;
+    }
+
+    /* Heading */
+    h1 {
+      font-size: 24px;
+      font-weight: 700;
+      margin-bottom: 10px;
+      line-height: 1.3;
+    }
+    .subtitle {
+      font-size: 14px;
+      font-weight: 600;
+      opacity: 0.75;
+      margin-bottom: 28px;
+      line-height: 1.6;
+    }
+
+    /* Referral code box */
+    .code-box {
+      background: rgba(255, 255, 255, 0.08);
+      border: 2px dashed rgba(255, 255, 255, 0.28);
+      border-radius: 18px;
+      padding: 22px 20px 18px;
+      margin-bottom: 18px;
+      cursor: pointer;
+      transition: background 0.2s;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .code-box:hover,
+    .code-box:active { background: rgba(255, 255, 255, 0.14); }
+
+    .code-label {
+      font-size: 12px;
+      font-weight: 600;
+      opacity: 0.65;
+      text-transform: uppercase;
+      letter-spacing: 1.5px;
+      margin-bottom: 10px;
+    }
+    .code {
+      font-size: 36px;
+      font-weight: 700;
+      letter-spacing: 8px;
+      user-select: all;
+    }
+    .tap-copy {
+      font-size: 11px;
+      font-weight: 600;
+      opacity: 0.5;
+      margin-top: 10px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+    .copied-toast {
+      font-size: 12px;
+      font-weight: 700;
+      color: #96D31C;
+      margin-top: 6px;
+      opacity: 0;
+      transition: opacity 0.3s;
+    }
+    .copied-toast.show { opacity: 1; }
+
+    /* Points */
+    .points {
+      font-size: 15px;
+      font-weight: 600;
+      opacity: 0.9;
+      margin-bottom: 28px;
+    }
+    .points strong {
+      color: #D95AFF;
+      font-weight: 700;
+    }
+
+    /* Store badges */
+    .store-section { display: none; }
+    .store-section.visible { display: block; }
+
+    .store-badges {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 24px;
+    }
+
+    .store-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 12px;
+      background: #fff;
+      color: #0F0556;
+      padding: 13px 24px;
+      border-radius: 14px;
+      text-decoration: none;
+      font-family: 'Quicksand', sans-serif;
+      font-weight: 700;
+      font-size: 15px;
+      min-width: 230px;
+      transition: transform 0.15s, box-shadow 0.15s;
+      justify-content: center;
+    }
+    .store-badge:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+    }
+    .store-badge svg { flex-shrink: 0; }
+
+    .store-badge-play {
+      background: rgba(255, 255, 255, 0.12);
+      color: #fff;
+      border: 1.5px solid rgba(255, 255, 255, 0.25);
+    }
+    .store-badge-play:hover {
+      background: rgba(255, 255, 255, 0.18);
+    }
+
+    /* Divider */
+    .divider {
+      font-size: 12px;
+      font-weight: 600;
+      opacity: 0.45;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin: 20px 0 16px;
+    }
+
+    /* QR codes (desktop only) */
+    .qr-section { display: none; margin-top: 8px; }
+    .qr-section.visible { display: block; }
+    .qr-label {
+      font-size: 13px;
+      font-weight: 600;
+      opacity: 0.6;
+      margin-bottom: 16px;
+    }
+    .qr-codes {
+      display: flex;
+      justify-content: center;
+      gap: 28px;
+      flex-wrap: wrap;
+    }
+    .qr-item { text-align: center; }
+    .qr-item canvas {
+      background: #fff;
+      border-radius: 14px;
+      padding: 8px;
+      display: block;
+    }
+    .qr-item-label {
+      font-size: 11px;
+      font-weight: 600;
+      opacity: 0.5;
+      margin-top: 8px;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+    }
+
+    .hidden { display: none !important; }
+  </style>
+</head>
+<body>
+  <div class="container">
+
+    <!-- App icon -->
+    <div class="logo-wrap">
+      <img src="app-icon.png" alt="SampleFinder" />
+    </div>
+
+    <h1>You've been invited!</h1>
+    <p class="subtitle">
+      Download the app and enter this referral code<br />
+      during signup to earn bonus points.
+    </p>
+
+    <!-- Referral code box -->
+    <div class="code-box" id="codeBox" onclick="copyCode()">
+      <div class="code-label">Your Referral Code</div>
+      <div class="code" id="referralCode">------</div>
+      <div class="tap-copy" id="tapCopy">tap to copy</div>
+      <div class="copied-toast" id="copiedToast">Copied!</div>
+    </div>
+
+    <div class="points">Sign up with this code to earn <strong>100 Points</strong></div>
+
+    <!-- Store download badges (always visible — user must tap to open the store
+         so they have time to copy the code first) -->
+    <div class="store-section" id="storeSection">
+      <div class="store-badges">
+        <a class="store-badge" id="appStoreLink" href="#">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M18.71 19.5C17.88 20.74 17 21.95 15.66 21.97C14.32 21.99 13.89 21.18 12.37 21.18C10.84 21.18 10.37 21.95 9.1 21.99C7.79 22.03 6.8 20.68 5.96 19.47C4.25 16.97 2.94 12.45 4.7 9.39C5.57 7.87 7.13 6.91 8.82 6.88C10.1 6.86 11.32 7.75 12.11 7.75C12.89 7.75 14.37 6.68 15.92 6.84C16.57 6.87 18.39 7.1 19.56 8.82C19.47 8.88 17.39 10.1 17.41 12.63C17.44 15.65 20.06 16.66 20.09 16.67C20.06 16.74 19.67 18.11 18.71 19.5ZM13 3.5C13.73 2.67 14.94 2.04 15.94 2C16.07 3.17 15.6 4.35 14.9 5.19C14.21 6.04 13.07 6.7 11.95 6.61C11.8 5.46 12.36 4.26 13 3.5Z"/>
+          </svg>
+          Download on App Store
+        </a>
+        <a class="store-badge store-badge-play" id="playStoreLink" href="#">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M3.18 23.73C2.59 23.43 2.17 22.83 2.17 22.08V1.92C2.17 1.17 2.59 0.57 3.18 0.27L13.04 11.99L3.18 23.73ZM16.83 15.78L5.19 22.49L14.16 12.87L16.83 15.78ZM21.17 10.81C21.71 11.14 22.08 11.56 22.08 12.08C22.08 12.6 21.71 13.03 21.2 13.33L18.44 14.87L15.42 11.99L18.44 9.12L21.17 10.81ZM5.19 1.51L16.83 8.22L14.16 11.12L5.19 1.51Z"/>
+          </svg>
+          Get it on Google Play
+        </a>
+      </div>
+    </div>
+
+    <!-- QR codes for desktop -->
+    <div class="qr-section" id="qrSection">
+      <div class="divider">or scan to download</div>
+      <div class="qr-codes">
+        <div class="qr-item">
+          <canvas id="qrAppStore" width="130" height="130"></canvas>
+          <div class="qr-item-label">App Store</div>
+        </div>
+        <div class="qr-item">
+          <canvas id="qrPlayStore" width="130" height="130"></canvas>
+          <div class="qr-item-label">Google Play</div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <script>
+    // ── Config ──────────────────────────────────────────────
+    var APPWRITE_ENDPOINT = 'https://nyc.cloud.appwrite.io/v1';
+    var APPWRITE_PROJECT_ID = '691d4a54003b21bf0136';
+    var APPWRITE_DATABASE_ID = '69217af50038b9005a61';
+    var SETTINGS_COLLECTION_ID = 'settings';
+
+    // Fallback store URLs (used if Appwrite fetch fails)
+    var FALLBACK_APPSTORE = 'https://apps.apple.com/app/samplefinder';
+    var FALLBACK_PLAYSTORE = 'https://play.google.com/store/apps/details?id=com.samplefinder.app';
+
+    // ── Platform detection ──────────────────────────────────
+    var ua = navigator.userAgent || '';
+    var isIOS = /iPhone|iPad|iPod/i.test(ua);
+    var isAndroid = /Android/i.test(ua);
+    var isMobile = isIOS || isAndroid;
+
+    // ── Extract referral code from URL ──────────────────────
+    var pathParts = window.location.pathname.split('/');
+    var referIdx = pathParts.indexOf('referral');
+    var code = referIdx >= 0 ? (pathParts[referIdx + 1] || '').toUpperCase() : '';
+    if (/^[A-Z2-9]{6}$/.test(code)) {
+      document.getElementById('referralCode').textContent = code;
+    }
+
+    // ── Copy referral code ──────────────────────────────────
+    function copyCode() {
+      var codeText = document.getElementById('referralCode').textContent;
+      if (!codeText || codeText === '------') return;
+      try {
+        navigator.clipboard.writeText(codeText).then(function() {
+          var toast = document.getElementById('copiedToast');
+          toast.classList.add('show');
+          setTimeout(function() { toast.classList.remove('show'); }, 2000);
+        });
+      } catch (_) {
+        // Clipboard API not available — silent fallback
+      }
+    }
+
+    // ── Fetch store links from Appwrite ─────────────────────
+    function fetchSettingValue(key) {
+      var url = APPWRITE_ENDPOINT
+        + '/databases/' + APPWRITE_DATABASE_ID
+        + '/collections/' + SETTINGS_COLLECTION_ID
+        + '/documents?queries[]='
+        + encodeURIComponent('{"method":"equal","attribute":"key","values":["' + key + '"]}');
+
+      return fetch(url, {
+        headers: { 'X-Appwrite-Project': APPWRITE_PROJECT_ID }
+      }).then(function(resp) {
+        if (!resp.ok) return null;
+        return resp.json().then(function(data) {
+          if (data.documents && data.documents.length > 0) {
+            return data.documents[0].value || null;
+          }
+          return null;
+        });
+      }).catch(function() { return null; });
+    }
+
+    function getStoreLinks() {
+      return Promise.all([
+        fetchSettingValue('appstore_link'),
+        fetchSettingValue('playstore_link'),
+      ]).then(function(results) {
+        return {
+          appStoreUrl: results[0] || FALLBACK_APPSTORE,
+          playStoreUrl: results[1] || FALLBACK_PLAYSTORE,
+        };
+      }).catch(function() {
+        return { appStoreUrl: FALLBACK_APPSTORE, playStoreUrl: FALLBACK_PLAYSTORE };
+      });
+    }
+
+    // ── QR code via external image API ─────────────────────
+    function drawQR(canvasId, text) {
+      var canvas = document.getElementById(canvasId);
+      if (!canvas) return;
+      var ctx = canvas.getContext('2d');
+      var size = canvas.width;
+
+      var img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.onload = function() {
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(0, 0, size, size);
+        ctx.drawImage(img, 6, 6, size - 12, size - 12);
+      };
+      img.onerror = function() {
+        var parent = canvas.parentElement;
+        if (parent) parent.style.display = 'none';
+      };
+      img.src = 'https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=' + encodeURIComponent(text);
+    }
+
+    // ── Main ────────────────────────────────────────────────
+    // No auto-redirect: the page used to bounce mobile users to the store
+    // after ~1.5s, which left no time to read or copy the referral code.
+    // Both store buttons are always visible — the user taps one when ready
+    // and the store opens then. Desktop additionally shows QR codes.
+    getStoreLinks().then(function(links) {
+      document.getElementById('appStoreLink').href = links.appStoreUrl;
+      document.getElementById('playStoreLink').href = links.playStoreUrl;
+      document.getElementById('storeSection').classList.add('visible');
+
+      if (!isMobile) {
+        document.getElementById('qrSection').classList.add('visible');
+        drawQR('qrAppStore', links.appStoreUrl);
+        drawQR('qrPlayStore', links.playStoreUrl);
+      }
+    });
+  </script>
+</body>
+</html>

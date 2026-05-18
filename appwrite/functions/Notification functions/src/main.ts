@@ -863,16 +863,33 @@ async function checkAndSendEventReminders(
     )) as Event[];
     log(`Found ${events.length} total events`);
 
-    // Create a map of events by ID for quick lookup
+    // Index events by ID and cache the parsed start instant. We deliberately do NOT fall
+    // back to event.date (midnight UTC of the event day) because that anchors reminders to
+    // midnight and produces "starts in 1 hour" pushes at 11pm the day before for any event
+    // whose true start time was never set. If startTime is missing or unparseable, skip
+    // the event entirely so the issue surfaces in logs instead of as a wrong-time push.
+    const eventStartInstantById = new Map<string, Date>();
     const eventsMap = new Map<string, Event>();
     const events24h: Event[] = [];
     const events1h: Event[] = [];
+    let eventsSkippedMissingStart = 0;
 
     for (const event of events) {
-      const eventDate = new Date(event.startTime || event.date);
       eventsMap.set(event.$id, event);
-      
-      // Check if event is in 24h window
+
+      if (!event.startTime) {
+        eventsSkippedMissingStart++;
+        log(`Skipping event ${event.$id} "${event.name}": missing startTime (date=${event.date ?? 'n/a'})`);
+        continue;
+      }
+      const eventDate = new Date(event.startTime);
+      if (Number.isNaN(eventDate.getTime())) {
+        eventsSkippedMissingStart++;
+        log(`Skipping event ${event.$id} "${event.name}": unparseable startTime="${event.startTime}"`);
+        continue;
+      }
+      eventStartInstantById.set(event.$id, eventDate);
+
       if (eventDate >= time24hStart && eventDate <= time24hEnd) {
         events24h.push(event);
       }
@@ -883,7 +900,9 @@ async function checkAndSendEventReminders(
       }
     }
 
-    log(`Events in 24h window: ${events24h.length}, in 1h window: ${events1h.length}`);
+    log(
+      `Events in 24h window: ${events24h.length}, in 1h window: ${events1h.length}, skipped (missing/invalid startTime): ${eventsSkippedMissingStart}`
+    );
 
     // Fetch all users
     const allUsers = (await listAllDocuments(
@@ -919,7 +938,8 @@ async function checkAndSendEventReminders(
           const event = eventsMap.get(savedEvent.eventId);
           if (!event) continue;
 
-          const eventDate = new Date(event.startTime || event.date);
+          const eventDate = eventStartInstantById.get(savedEvent.eventId);
+          if (!eventDate) continue; // event was skipped above (no valid startTime)
 
           // Check if user needs 24h reminder for this event
           if (
@@ -927,8 +947,11 @@ async function checkAndSendEventReminders(
             eventDate <= time24hEnd &&
             !savedEvent.reminder24hSent
           ) {
-            log(`User ${user.$id} needs 24h reminder for event "${event.name}"`);
-            
+            const deltaMs = eventDate.getTime() - now.getTime();
+            log(
+              `[24h fire] user=${user.$id} event=${event.$id} startTime=${event.startTime} now=${now.toISOString()} deltaMs=${deltaMs}`
+            );
+
             // Send push notification
             await sendPushNotificationToUsers(
               messaging,
@@ -970,8 +993,11 @@ async function checkAndSendEventReminders(
             eventDate <= time1hEnd &&
             !savedEvent.reminder1hSent
           ) {
-            log(`User ${user.$id} needs 1h reminder for event "${event.name}"`);
-            
+            const deltaMs = eventDate.getTime() - now.getTime();
+            log(
+              `[1h fire] user=${user.$id} event=${event.$id} startTime=${event.startTime} now=${now.toISOString()} deltaMs=${deltaMs}`
+            );
+
             // Send push notification
             await sendPushNotificationToUsers(
               messaging,
@@ -1632,10 +1658,14 @@ async function checkAndSendBirthdayNotifications(
     if (!user.dob || !user.authID) continue;
     if (user.birthdayNotifYear === currentYear) continue;
 
-    const dob = new Date(user.dob);
-    if (Number.isNaN(dob.getTime())) continue;
-    const dobParts = getTimePartsInTimezone(dob, EST_TIMEZONE);
-    if (dobParts.month !== currentMonth || dobParts.day !== currentDay) continue;
+    // DOB is a calendar date pinned to UTC midnight (e.g. "1988-08-07T00:00:00.000Z").
+    // Read the calendar M/D from the ISO prefix directly — converting to EST would roll
+    // the day back (UTC midnight Aug 7 → Aug 6 evening EST), firing birthdays one day early.
+    const dobMatch = user.dob.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+    if (!dobMatch) continue;
+    const dobMonth = parseInt(dobMatch[2], 10);
+    const dobDay = parseInt(dobMatch[3], 10);
+    if (dobMonth !== currentMonth || dobDay !== currentDay) continue;
 
     log(`Birthday: sending to user ${user.$id}`);
 

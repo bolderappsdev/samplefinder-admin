@@ -47,20 +47,23 @@ const UsersTable = ({
   hasFilters = false,
 }: UsersTableProps) => {
   const isFiltered = searchTerm.trim().length > 0 || hasFilters
-  // Format date-only (e.g. DOB) as local calendar date to avoid timezone shift (UTC midnight -> previous day)
+  // DOB column is rendered MM/DD/YYYY by manual string construction so the format is
+  // locale-proof (browsers like en-GB would otherwise produce DD/MM/YYYY from toLocaleDateString)
+  // and timezone-proof: we use the ISO date prefix or UTC components so UTC midnight does not
+  // roll back to the previous day in negative-offset zones.
   const formatDateOnly = (dateStr: string | undefined): string => {
     if (!dateStr) return '-'
     const match = dateStr.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/)
     if (match) {
       const [, y, m, d] = match
-      const year = parseInt(y!, 10)
-      const month = parseInt(m!, 10) - 1
-      const day = parseInt(d!, 10)
-      const date = new Date(year, month, day)
-      if (isNaN(date.getTime())) return '-'
-      return date.toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' })
+      return `${m!.padStart(2, '0')}/${d!.padStart(2, '0')}/${y}`
     }
-    return new Date(dateStr).toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' })
+    const dt = new Date(dateStr)
+    if (isNaN(dt.getTime())) return '-'
+    const y = dt.getUTCFullYear()
+    const m = String(dt.getUTCMonth() + 1).padStart(2, '0')
+    const d = String(dt.getUTCDate()).padStart(2, '0')
+    return `${m}/${d}/${y}`
   }
 
   // Format phone number to (XXX) XXX-XXXX
