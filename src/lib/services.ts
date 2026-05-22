@@ -2152,6 +2152,59 @@ export function tierLevelForTotalPoints(tiers: TierDocument[], totalPoints: numb
   return String(chosen?.name ?? '').trim()
 }
 
+const normalizeTierKey = (value: string): string =>
+  value.trim().toLowerCase().replace(/[^a-z0-9]/g, '')
+
+function resolveStoredTier(tiers: TierDocument[], storedTierLevel: string): TierDocument | null {
+  const normalized = normalizeTierKey(storedTierLevel)
+  if (!normalized) return null
+
+  const byName = tiers.find((t) => normalizeTierKey(String(t.name ?? '')) === normalized)
+  if (byName) return byName
+
+  const numMatch = storedTierLevel.match(/\d+/)
+  if (numMatch) {
+    const order = Number.parseInt(numMatch[0], 10)
+    if (Number.isFinite(order)) {
+      const byOrder = tiers.find((t) => Number(t.order) === order)
+      if (byOrder) return byOrder
+    }
+  }
+
+  return null
+}
+
+/**
+ * Effective tier name shown to users: highest of (a) stored tierLevel resolved against
+ * the tier table and (b) the tier the user's current points qualify for. Heals out-of-sync
+ * profiles where tierLevel lags points. Mirrors the mobile app's resolveEffectiveTier so
+ * the admin Users table never disagrees with the app's Achievements/Profile screens.
+ */
+export function effectiveTierLevel(
+  tiers: TierDocument[],
+  storedTierLevel: string | null | undefined,
+  totalPoints: number
+): string {
+  if (tiers.length === 0) return String(storedTierLevel ?? '').trim()
+
+  const pointsTierName = tierLevelForTotalPoints(tiers, totalPoints)
+  const stored = (storedTierLevel ?? '').toString()
+  const canonical = resolveStoredTier(tiers, stored)
+
+  if (!canonical) return pointsTierName
+
+  const pointsTier = tiers.find(
+    (t) => normalizeTierKey(String(t.name ?? '')) === normalizeTierKey(pointsTierName)
+  )
+  if (!pointsTier) return String(canonical.name ?? '').trim()
+
+  const canonicalOrder = Number(canonical.order) || 0
+  const pointsOrder = Number(pointsTier.order) || 0
+  return canonicalOrder >= pointsOrder
+    ? String(canonical.name ?? '').trim()
+    : String(pointsTier.name ?? '').trim()
+}
+
 // Tiers service
 export const tiersService = {
   // List all tiers ordered by order field

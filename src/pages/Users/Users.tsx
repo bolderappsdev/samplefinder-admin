@@ -25,6 +25,7 @@ import {
   tiersService,
   type TierDocument,
   tierLevelForTotalPoints,
+  effectiveTierLevel,
 } from '../../lib/services'
 import { Query, storage, appwriteConfig, ID } from '../../lib/appwrite'
 import { storedDobToDateInputValue } from '../../lib/formUtils'
@@ -134,12 +135,22 @@ const Users = () => {
       // Ignore result if a newer fetch has started (e.g. user cleared search before this completed)
       if (thisFetchId !== fetchIdRef.current) return
 
+      // Substitute the stored tierLevel with the effective tier (max of stored vs
+      // points-derived) so the table displays the same tier the mobile app shows on
+      // Achievements/Profile. Falls back to stored value when tier metadata isn't loaded.
+      const usersWithEffectiveTier = filterTierList.length > 0
+        ? result.users.map((u) => ({
+            ...u,
+            tierLevel: effectiveTierLevel(filterTierList, u.tierLevel, u.totalPoints ?? 0),
+          }))
+        : result.users
+
       // Client-side filtering for accurate search results (email, phone, or text)
-      let filteredUsers = result.users
+      let filteredUsers = usersWithEffectiveTier
       let filteredTotal = result.total
 
       if (isEmailSearch || isPhoneSearch) {
-        filteredUsers = result.users.filter(user => {
+        filteredUsers = usersWithEffectiveTier.filter(user => {
           if (isEmailSearch) {
             return user.email?.toLowerCase().includes(trimmedSearch.toLowerCase())
           }
@@ -157,7 +168,7 @@ const Users = () => {
       } else if (hasSearch) {
         // Text search: match against firstname, lastname, username, AND email (case-insensitive)
         const lowerSearch = trimmedSearch.toLowerCase()
-        filteredUsers = result.users.filter(user =>
+        filteredUsers = usersWithEffectiveTier.filter(user =>
           [user.firstname, user.lastname, user.username, user.email].some(field =>
             field != null && String(field).toLowerCase().includes(lowerSearch)
           )
