@@ -1,6 +1,14 @@
-import { eventsService, clientsService, appUsersService, categoriesService, locationsService, reviewsService, triviaService, triviaResponsesService, isCorrectTriviaResponse } from './services'
-import type { EventDocument, ClientDocument, AppUser, TriviaDocument, TriviaResponseDocument, ReviewDocument } from './services'
+import { eventsService, clientsService, appUsersService, categoriesService, locationsService, reviewsService, triviaService, triviaResponsesService, checkinsService, isCorrectTriviaResponse } from './services'
+import type { EventDocument, ClientDocument, AppUser, TriviaDocument, TriviaResponseDocument, ReviewDocument, CheckinDocument } from './services'
 import { Query } from './appwrite'
+import {
+  aggregatePointsEarnedInRange,
+  breakdownTotalPoints,
+  breakdownCheckInReviewPoints,
+  emptyPointsBreakdown,
+  type PointsEarnedBreakdown,
+  type TriviaPointInfo,
+} from './reportPoints'
 import { getAppTimezoneShortLabel } from './dateUtils'
 import jsPDF from 'jspdf'
 import autoTable from 'jspdf-autotable'
@@ -132,6 +140,20 @@ const pointsEarnedColumns: ReportColumn[] = [
   { header: 'Check-Ins', key: 'checkIns' },
   { header: 'Reviews', key: 'reviews' },
   { header: 'Trivias Won', key: 'triviasWon' },
+]
+
+// Points Earned (Date Range) columns. Same keys as the "All" report (so sorting/preview behave
+// identically), but headers state that values are scoped to the selected window.
+const pointsEarnedDateRangeColumns: ReportColumn[] = [
+  { header: 'First Name', key: 'firstName' },
+  { header: 'Last Name', key: 'lastName' },
+  { header: 'Username', key: 'username' },
+  { header: 'Tier Level', key: 'tierLevel' },
+  { header: 'Points Earned (Range)', key: 'userPoints' },
+  { header: 'Check-in/Review Pts (Range)', key: 'checkInReviewPoints' },
+  { header: 'Check-Ins (Range)', key: 'checkIns' },
+  { header: 'Reviews (Range)', key: 'reviews' },
+  { header: 'Trivias Won (Range)', key: 'triviasWon' },
 ]
 
 // Event Recap columns
@@ -338,6 +360,14 @@ const SORT_DATE_COLUMN_KEYS = new Set(['dob', 'signUpDate', 'lastLoginDate', 'da
 // Numeric columns that sort descending in export so order matches Preview Reports UI
 const SORT_DESCENDING_NUMERIC_KEYS = new Set(['userPoints', 'checkInReviewPoints', 'checkIns', 'reviews', 'triviasWon', 'favorites', 'checkInPoints', 'reviewPoints', 'referralsCount'])
 
+// Default sort key per report when the caller doesn't pass one. Points reports rank by points
+// descending (winner first) instead of falling back to the first column (alphabetical by name),
+// which matters for the "winner of the month" use case. Mirrored by Preview's defaultSortKeyByReport.
+const DEFAULT_EXPORT_SORT_KEY: Partial<Record<ReportType, string>> = {
+  'points-earned-all': 'userPoints',
+  'points-earned-date-range': 'userPoints',
+}
+
 const parseSortableDate = (value: string | number): number => {
   if (value === '' || value === undefined || value === null) return NaN
   const str = String(value).trim()
@@ -540,6 +570,103 @@ async function fetchTriviasWonCountByUser(): Promise<Map<string, number>> {
   } while (responseChunk.length === REPORT_LIST_PAGE_SIZE)
 
   return countByUserId
+}
+
+// Page sizes for the in-range points aggregation (Points Earned date-range report).
+const REPORT_CHECKINS_PAGE_SIZE = 500
+const REPORT_TRIVIA_RESPONSES_PAGE_SIZE = 500
+
+/** Build the $createdAt window queries shared by all in-range record fetches. */
+function createdAtRangeQueries(dateRange?: { start: Date | null; end: Date | null }): string[] {
+  const queries: string[] = []
+  if (dateRange?.start) {
+    queries.push(Query.greaterThanEqual('$createdAt', dateRange.start.toISOString()))
+  }
+  if (dateRange?.end) {
+    const endDate = new Date(dateRange.end)
+    endDate.setHours(23, 59, 59, 999)
+    queries.push(Query.lessThanEqual('$createdAt', endDate.toISOString()))
+  }
+  return queries
+}
+
+/**
+ * Page through a collection's list endpoint, appending the given filter queries.
+ * Uses cursor pagination (not offset) so it has no 5,000-row ceiling — the date-range
+ * aggregation scans whole collections for a window and can exceed that. Mirrors the
+ * mobile app's check-in pagination.
+ */
+async function listAllPaged<T extends { $id: string }>(
+  service: { list: (queries?: string[]) => Promise<{ documents: T[] }> },
+  filterQueries: string[],
+  pageSize: number
+): Promise<T[]> {
+  const all: T[] = []
+  let cursor: string | null = null
+  for (;;) {
+    const queries = [Query.limit(pageSize), ...filterQueries]
+    if (cursor) queries.push(Query.cursorAfter(cursor))
+    const result = await service.list(queries)
+    const docs = result.documents ?? []
+    all.push(...docs)
+    if (docs.length < pageSize) break
+    cursor = docs[docs.length - 1]!.$id
+  }
+  return all
+}
+
+/**
+ * Map trivia id -> { correctOptionIndex, points } for scoring trivia responses.
+ * Note: this uses each trivia's CURRENT answer key / points value, not a point-in-time
+ * snapshot — consistent with the all-time fetchTriviasWonCountByUser. If an answer key is
+ * edited after a reporting period, past responses are re-scored against the new key.
+ */
+async function fetchTriviaPointInfoById(): Promise<Map<string, TriviaPointInfo>> {
+  const byId = new Map<string, TriviaPointInfo>()
+  const triviaDocs = await listAllPaged<TriviaDocument>(triviaService, [], REPORT_LIST_PAGE_SIZE)
+  for (const t of triviaDocs) {
+    if (t.$id != null) {
+      byId.set(t.$id, {
+        correctOptionIndex: Number(t.correctOptionIndex),
+        points: Number(t.points) || 0,
+      })
+    }
+  }
+  return byId
+}
+
+/**
+ * Points earned per user within a date range, summed from dated records:
+ * check-ins (checkins.points) + reviews (reviews.pointsEarned) + trivia wins (trivia.points).
+ * Used by the "Points Earned (Date Range)" report so the ranking reflects the selected window
+ * rather than the lifetime user_profiles.totalPoints. Referral / signup / badge / birthday
+ * bonuses are intentionally excluded — they have no dated record to attribute to a window.
+ */
+async function fetchPointsEarnedInRangeByUser(
+  dateRange?: { start: Date | null; end: Date | null }
+): Promise<Map<string, PointsEarnedBreakdown>> {
+  const filterQueries = createdAtRangeQueries(dateRange)
+  const [checkins, reviews, triviaResponses, triviaById] = await Promise.all([
+    listAllPaged<CheckinDocument>(checkinsService, filterQueries, REPORT_CHECKINS_PAGE_SIZE),
+    listAllPaged<ReviewDocument>(reviewsService, filterQueries, REPORT_REVIEWS_PAGE_SIZE),
+    listAllPaged<TriviaResponseDocument>(triviaResponsesService, filterQueries, REPORT_TRIVIA_RESPONSES_PAGE_SIZE),
+    fetchTriviaPointInfoById(),
+  ])
+  return aggregatePointsEarnedInRange({ checkins, reviews, triviaResponses, triviaById })
+}
+
+/** Sort Points-report rows by userPoints desc; stable tie-break by username then original index. */
+function sortPointsRowsByUserPointsDesc(rows: Record<string, string | number>[]): void {
+  const withIndex = rows.map((row, i) => ({ row, i }))
+  withIndex.sort(({ row: a, i: aIdx }, { row: b, i: bIdx }) => {
+    const aPoints = parseInt(a.userPoints as string) || 0
+    const bPoints = parseInt(b.userPoints as string) || 0
+    if (bPoints !== aPoints) return bPoints - aPoints
+    const nameCmp = String(a.username ?? '').localeCompare(String(b.username ?? ''))
+    return nameCmp !== 0 ? nameCmp : aIdx - bIdx
+  })
+  rows.length = 0
+  rows.push(...withIndex.map(({ row }) => row))
 }
 
 // Export Service
@@ -1866,20 +1993,64 @@ export const exportService = {
   },
 
   /**
-   * Generate Points Earned report
+   * Generate Points Earned report.
    * Fetches all users (paginated) so report total matches actual user count.
-   * Check-in/Review Pts = events points + reviews points (check-in points from events + pointsEarned from reviews).
-   * When useDateRangeForPoints is true, only points from reviews created within dateRange are included.
+   *
+   * - useDateRangeForPoints = false ("All"): every points/activity column is the user's
+   *   lifetime value (User Points = user_profiles.totalPoints).
+   * - useDateRangeForPoints = true ("Date Range" / winner-of-the-month): every points/activity
+   *   column reflects ONLY the selected window, summed from dated records — User Points =
+   *   check-in + review + trivia points earned in range, and the rows are ranked by it.
    */
   async generatePointsEarnedReport(
     dateRange?: { start: Date | null; end: Date | null },
     useDateRangeForPoints = false,
     appTimezone?: string
   ): Promise<{ columns: ReportColumn[]; rows: Record<string, string | number>[] }> {
-    const pointsDateRange = useDateRangeForPoints ? dateRange : undefined
+    // Tier Level is a lifetime property of the user; derive from lifetime points when unset.
+    const deriveTier = (existing: string, lifetimePoints: number): string => {
+      if (existing) return existing
+      if (lifetimePoints >= 1000) return 'ProSampler'
+      if (lifetimePoints >= 500) return 'Sampler'
+      return 'NewbieSampler'
+    }
+
+    if (useDateRangeForPoints) {
+      const [usersResult, earnedByUser] = await Promise.all([
+        fetchAllAppUsers(),
+        fetchPointsEarnedInRangeByUser(dateRange),
+      ])
+
+      const rows = usersResult.map((user: AppUser) => {
+        const userRecord = user as Record<string, unknown>
+        const userId = (user as { $id?: string }).$id
+        const breakdown = (userId ? earnedByUser.get(userId) : undefined) ?? emptyPointsBreakdown()
+        const lifetimePoints = (userRecord.totalPoints as number) ?? (userRecord.userPoints as number) ?? 0
+
+        return {
+          firstName: user.firstName || '',
+          lastName: user.lastName || '',
+          username: (userRecord.username as string) || '',
+          email: user.email || '',
+          lastLoginDate: formatDate(user.lastLoginDate, appTimezone),
+          tierLevel: deriveTier((userRecord.tierLevel as string) || '', lifetimePoints),
+          // Points earned in the selected window (check-in + review + trivia); drives the ranking.
+          userPoints: breakdownTotalPoints(breakdown).toString(),
+          checkInReviewPoints: breakdownCheckInReviewPoints(breakdown).toString(),
+          checkIns: breakdown.checkInCount.toString(),
+          reviews: breakdown.reviewCount.toString(),
+          triviasWon: breakdown.triviaWins.toString(),
+        }
+      })
+
+      sortPointsRowsByUserPointsDesc(rows)
+      return { columns: pointsEarnedDateRangeColumns, rows }
+    }
+
+    // All-time report: lifetime totals from user_profiles + all-time aggregations.
     const [usersResult, checkInReviewPointsByUser, triviasWonByUser] = await Promise.all([
       fetchAllAppUsers(),
-      fetchCheckInReviewPointsByUser(pointsDateRange),
+      fetchCheckInReviewPointsByUser(),
       fetchTriviasWonCountByUser(),
     ])
 
@@ -1898,23 +2069,13 @@ export const exportService = {
       const totalEvents = (userRecord.totalEvents as number) ?? (userRecord.checkIns as number) ?? 0
       const triviasWon = (userId ? triviasWonByUser.get(userId) : undefined) ?? (userRecord.triviasWon as number) ?? 0
 
-      // Tier Level from user_profiles; fallback from totalPoints if not set
-      let tierLevel = (userRecord.tierLevel as string) || ''
-      if (!tierLevel && totalPoints > 0) {
-        if (totalPoints >= 1000) tierLevel = 'ProSampler'
-        else if (totalPoints >= 500) tierLevel = 'Sampler'
-        else tierLevel = 'NewbieSampler'
-      } else if (!tierLevel) {
-        tierLevel = 'NewbieSampler'
-      }
-
       return {
         firstName: user.firstName || '',
         lastName: user.lastName || '',
         username: (userRecord.username as string) || '',
         email: user.email || '',
         lastLoginDate: formatDate(user.lastLoginDate, appTimezone),
-        tierLevel,
+        tierLevel: deriveTier((userRecord.tierLevel as string) || '', totalPoints),
         userPoints: totalPoints.toString(),
         checkInReviewPoints: checkInReviewPoints.toString(),
         checkIns: totalEvents.toString(),
@@ -1923,22 +2084,8 @@ export const exportService = {
       }
     })
 
-    // Sort by userPoints descending; stable tie-break by username then index
-    const withIndex = rows.map((row, i) => ({ row, i }))
-    withIndex.sort(({ row: a, i: aIdx }, { row: b, i: bIdx }) => {
-      const aPoints = parseInt(a.userPoints as string) || 0
-      const bPoints = parseInt(b.userPoints as string) || 0
-      if (bPoints !== aPoints) return bPoints - aPoints
-      const nameCmp = String(a.username ?? '').localeCompare(String(b.username ?? ''))
-      return nameCmp !== 0 ? nameCmp : aIdx - bIdx
-    })
-    rows.length = 0
-    rows.push(...withIndex.map(({ row }) => row))
-
-    return {
-      columns: pointsEarnedColumns,
-      rows,
-    }
+    sortPointsRowsByUserPointsDesc(rows)
+    return { columns: pointsEarnedColumns, rows }
   },
 
   /**
@@ -2125,7 +2272,9 @@ export const exportService = {
     try {
       const { columns, rows } = await this.generateReportData(reportType, dateRange, appTimezone)
       const columnKeys = new Set(columns.map((c) => c.key))
-      const effectiveSortKey = sortKey && columnKeys.has(sortKey) ? sortKey : columns[0]?.key
+      const reportDefaultKey = DEFAULT_EXPORT_SORT_KEY[reportType]
+      const defaultSortKey = reportDefaultKey && columnKeys.has(reportDefaultKey) ? reportDefaultKey : columns[0]?.key
+      const effectiveSortKey = sortKey && columnKeys.has(sortKey) ? sortKey : defaultSortKey
       const sortedRows = effectiveSortKey ? sortReportRows(rows, effectiveSortKey) : rows
       const sortLabel = effectiveSortKey ? (columns.find(c => c.key === effectiveSortKey)?.header ?? effectiveSortKey) : undefined
       const csvContent = this.exportToCSV(columns, sortedRows, sortLabel)
@@ -2150,7 +2299,9 @@ export const exportService = {
     try {
       const { columns, rows } = await this.generateReportData(reportType, dateRange, appTimezone)
       const columnKeys = new Set(columns.map((c) => c.key))
-      const effectiveSortKey = sortKey && columnKeys.has(sortKey) ? sortKey : columns[0]?.key
+      const reportDefaultKey = DEFAULT_EXPORT_SORT_KEY[reportType]
+      const defaultSortKey = reportDefaultKey && columnKeys.has(reportDefaultKey) ? reportDefaultKey : columns[0]?.key
+      const effectiveSortKey = sortKey && columnKeys.has(sortKey) ? sortKey : defaultSortKey
       const sortedRows = effectiveSortKey ? sortReportRows(rows, effectiveSortKey) : rows
 
       // Use landscape when 5+ columns so all columns fit on page without being

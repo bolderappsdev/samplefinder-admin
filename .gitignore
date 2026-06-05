@@ -29,3 +29,6 @@ dist-ssr
 .env.production
 
 .claude/
+
+# transient tsc output for scripts/verify-points-earned.mjs
+scripts/.ptcheck/

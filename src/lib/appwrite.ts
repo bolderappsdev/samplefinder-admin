@@ -14,6 +14,7 @@ export const appwriteConfig = {
     trivia: import.meta.env.VITE_APPWRITE_COLLECTION_TRIVIA || 'trivia', // Table ID
     triviaResponses: import.meta.env.VITE_APPWRITE_COLLECTION_TRIVIA_RESPONSES || 'trivia_responses', // Table ID
     reviews: import.meta.env.VITE_APPWRITE_COLLECTION_REVIEWS || 'reviews', // Table ID
+    checkins: import.meta.env.VITE_APPWRITE_COLLECTION_CHECKINS || 'checkins', // Table ID
     reports: import.meta.env.VITE_APPWRITE_COLLECTION_REPORTS || '',
     notifications: import.meta.env.VITE_APPWRITE_COLLECTION_NOTIFICATIONS || 'notifications', // Table ID
     categories: import.meta.env.VITE_APPWRITE_COLLECTION_CATEGORIES || 'categories', // Table ID

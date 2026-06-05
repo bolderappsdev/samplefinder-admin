@@ -163,9 +163,12 @@ const PreviewReports = () => {
 
   // Column keys that hold display dates (MM/DD/YYYY) and should be sorted chronologically
   const dateColumnKeys = new Set(['dob', 'signUpDate', 'lastLoginDate', 'date', 'signupDate', 'eventDate', 'triviaDate'])
-  // Ensure Clients & Brands default sort key exists in that report's columns
-  const defaultSortKeyByReport: Record<string, string> = { 
+  // Ensure each report opens on a sensible sort key that exists in its columns.
+  // Points Earned reports (6 = All, 7 = Date Range) rank by points descending (winner first).
+  const defaultSortKeyByReport: Record<string, string> = {
     '4': 'signupDate',
+    '6': 'userPoints',
+    '7': 'userPoints',
     '8': 'eventDate',
     '9': 'triviaDate'
   }

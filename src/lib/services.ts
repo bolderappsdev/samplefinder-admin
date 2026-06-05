@@ -12,6 +12,7 @@ export const COLLECTION_IDS = {
   TRIVIA: 'trivia',
   TRIVIA_RESPONSES: 'trivia_responses',
   REVIEWS: 'reviews',
+  CHECKINS: 'checkins',
   SETTINGS: 'settings',
   TIERS: 'tiers',
   LOCATIONS: 'locations',
@@ -2024,6 +2025,20 @@ export const reviewsService = {
       { isHidden: false }
     )
   },
+}
+
+// Check-in Document interface (one row per user check-in to an event)
+export interface CheckinDocument extends Models.Document {
+  user?: string // Relationship to user_profiles table (user ID)
+  event?: string // Relationship to events table (event ID)
+  points?: number // Points earned for this check-in
+  [key: string]: unknown
+}
+
+// Check-ins service (read-only here; check-ins are created by the mobile app)
+export const checkinsService = {
+  list: (queries?: string[]) =>
+    DatabaseService.list<CheckinDocument>(appwriteConfig.collections.checkins, queries),
 }
 
 // Settings Document interface
