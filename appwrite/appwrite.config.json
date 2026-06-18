@@ -169,6 +169,13 @@
                     "encrypt": false
                 },
                 {
+                    "key": "phoneVerified",
+                    "type": "boolean",
+                    "required": false,
+                    "array": false,
+                    "default": false
+                },
+                {
                     "key": "firstname",
                     "type": "string",
                     "required": false,
