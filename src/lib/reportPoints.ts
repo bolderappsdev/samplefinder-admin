@@ -3,19 +3,36 @@
 // Kept free of Appwrite/Vite imports so the aggregation can be unit-tested in
 // isolation (see scripts/verify-points-earned.mjs).
 //
-// Background: a user's `user_profiles.totalPoints` is a *lifetime* running total
-// that mixes in sources with no dated record (referral / signup / badge / birthday
-// bonuses), so it cannot be attributed to a time window. To rank a "winner of the
-// month" we instead sum the point-earning events that DO have a `$createdAt`:
-//   - check-ins      -> checkins.points
-//   - reviews        -> reviews.pointsEarned
-//   - trivia wins    -> trivia.points (when the answer matches the correct option)
+// Background: a user's `user_profiles.totalPoints` is a *lifetime* running total. To
+// attribute points to a time window (e.g. "winner of the month") we sum the point-earning
+// events that can be dated:
+//   - check-ins      -> checkins.points              (dated by checkins.$createdAt)
+//   - reviews        -> reviews.pointsEarned          (dated by reviews.$createdAt)
+//   - trivia wins    -> trivia.points                 (when the answer matches the correct option)
+//   - signup bonus   -> SIGNUP_BONUS_POINTS           (dated by the user's $createdAt)
+//   - referral bonus -> referee points from Settings  (dated by the user's $createdAt; only when
+//                       the user signed up with a referral code, i.e. usedReferralCode is set)
+// Signup and referee-referral bonuses have no dated transaction record of their own, so they are
+// attributed to the user's account-creation date — the moment both are granted in the signup flow.
+// Badge / birthday bonuses remain excluded: they have neither a dated record nor a usable proxy.
+
+/**
+ * Flat welcome bonus granted at account creation. Mirrors the signup path in the admin
+ * "Mobile API" function (createUser: `totalPoints` defaults to 100) and the mobile app's own
+ * signup. There is no Settings entry for it and no dated transaction record, so the report
+ * attributes it to the user's `$createdAt`.
+ */
+export const SIGNUP_BONUS_POINTS = 100
 
 /** Per-user breakdown of points (and activity counts) earned within a date range. */
 export interface PointsEarnedBreakdown {
   checkInPoints: number
   reviewPoints: number
   triviaPoints: number
+  /** Welcome bonus (SIGNUP_BONUS_POINTS) when the user's account was created in range. */
+  signupPoints: number
+  /** Referee referral bonus when the user signed up with a referral code in range. */
+  referralPoints: number
   checkInCount: number
   reviewCount: number
   triviaWins: number
@@ -40,15 +57,23 @@ export function emptyPointsBreakdown(): PointsEarnedBreakdown {
     checkInPoints: 0,
     reviewPoints: 0,
     triviaPoints: 0,
+    signupPoints: 0,
+    referralPoints: 0,
     checkInCount: 0,
     reviewCount: 0,
     triviaWins: 0,
   }
 }
 
-/** Total points earned in range = check-in + review + trivia points. */
+/** Total points earned in range = check-in + review + trivia + signup + referral points. */
 export function breakdownTotalPoints(b: PointsEarnedBreakdown): number {
-  return b.checkInPoints + b.reviewPoints + b.triviaPoints
+  return (
+    b.checkInPoints +
+    b.reviewPoints +
+    b.triviaPoints +
+    b.signupPoints +
+    b.referralPoints
+  )
 }
 
 /** Check-in + review points only (the "Check-in/Review Pts" column). */
@@ -71,14 +96,24 @@ const toNum = (v: unknown): number => {
  * - reviews:    + reviews.pointsEarned,       reviewCount  += 1
  * - trivia:     + trivia.points and triviaWins += 1, only when the response's answerIndex
  *               matches the linked trivia's correctOptionIndex (unknown/deleted trivia skipped)
+ * - signups:    + signupBonus to signupPoints; + refereePts to referralPoints when the user's
+ *               usedReferralCode is set. The caller must pass only users whose $createdAt is in
+ *               range; this function does no date filtering.
  *
- * Users with no qualifying activity are simply absent from the returned map.
+ * Users with no qualifying activity (no in-range record and no in-range signup) are absent.
  */
 export function aggregatePointsEarnedInRange(input: {
   checkins: { user?: Relation; points?: number | string }[]
   reviews: { user?: Relation; pointsEarned?: number | string }[]
   triviaResponses: { user?: Relation; trivia?: Relation; answerIndex?: number | string }[]
   triviaById: Map<string, TriviaPointInfo>
+  /**
+   * Users whose account was created within the date range (caller filters by `$createdAt`).
+   * Each contributes `signupBonus`; those with a non-empty `usedReferralCode` also get `refereePts`.
+   */
+  signups?: { user?: Relation; usedReferralCode?: string | null }[]
+  signupBonus?: number
+  refereePts?: number
 }): Map<string, PointsEarnedBreakdown> {
   const byUser = new Map<string, PointsEarnedBreakdown>()
   const ensure = (userId: string): PointsEarnedBreakdown => {
@@ -116,6 +151,17 @@ export function aggregatePointsEarnedInRange(input: {
     const b = ensure(userId)
     b.triviaPoints += toNum(trivia.points)
     b.triviaWins += 1
+  }
+
+  const signupBonus = toNum(input.signupBonus)
+  const refereePts = toNum(input.refereePts)
+  for (const s of input.signups ?? []) {
+    const userId = relationToId(s.user)
+    if (!userId) continue
+    const b = ensure(userId)
+    b.signupPoints += signupBonus
+    const code = typeof s.usedReferralCode === 'string' ? s.usedReferralCode.trim() : ''
+    if (code) b.referralPoints += refereePts
   }
 
   return byUser
