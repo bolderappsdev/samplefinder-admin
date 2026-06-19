@@ -2114,6 +2114,26 @@ export const settingsService = {
     return null
   },
 
+  /**
+   * Referee (new-user) referral bonus. Read by document ID to mirror the Mobile API's
+   * getReferralPointSettings (appwrite/functions/Mobile API/src/main.ts), which fetches the
+   * settings doc whose $id is 'ref_setting_referee_pts' and parses its integer `value`.
+   * Returns null if the setting is missing or not a valid non-negative integer.
+   */
+  getRefereeReferralPoints: async (): Promise<number | null> => {
+    try {
+      const doc = await DatabaseService.getById<SettingsDocument>(
+        appwriteConfig.collections.settings,
+        'ref_setting_referee_pts'
+      )
+      const value = parseInt(doc.value, 10)
+      return Number.isFinite(value) && value >= 0 ? value : null
+    } catch (error) {
+      console.error('Error fetching referee referral points setting:', error)
+      return null
+    }
+  },
+
   /** Get app timezone (IANA). Defaults to America/New_York if not set. */
   getAppTimezone: async (): Promise<string> => {
     const setting = await settingsService.getByKey('appTimezone')

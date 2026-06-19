@@ -11,6 +11,7 @@ import {
   aggregatePointsEarnedInRange,
   breakdownTotalPoints,
   breakdownCheckInReviewPoints,
+  SIGNUP_BONUS_POINTS,
 } from './.ptcheck/reportPoints.js'
 
 let failures = 0
@@ -29,9 +30,9 @@ const eq = (label, actual, expected) => {
 // the sum of its per-action point columns (check-in + review + trivia). A trivia win that
 // added points to the total but had no matching column is exactly the bug this guards against.
 const reconciles = (label, b) =>
-  eq(`${label}: total == checkIn+review+trivia points`,
+  eq(`${label}: total == checkIn+review+trivia+signup+referral points`,
     breakdownTotalPoints(b),
-    b.checkInPoints + b.reviewPoints + b.triviaPoints)
+    b.checkInPoints + b.reviewPoints + b.triviaPoints + b.signupPoints + b.referralPoints)
 
 const triviaById = new Map([
   ['triviaA', { correctOptionIndex: 2, points: 30 }],
@@ -134,6 +135,63 @@ eq('ragna review points', ragna.reviewPoints, 0)
 eq('ragna trivia wins', ragna.triviaWins, 2)
 eq('ragna trivia points carry the whole total', ragna.triviaPoints, breakdownTotalPoints(ragna))
 reconciles('ragna', ragna)
+
+// --- Case 7: signup + referee-referral points attributed to in-range signups ---
+// A user who signed up in range with a referral code earns the welcome bonus AND the referee
+// bonus; both join the total and must reconcile with the new per-action columns. Signups with no
+// code (empty or undefined) get the welcome bonus only.
+const refereePts = 100
+const signupRes = aggregatePointsEarnedInRange({
+  checkins: [{ user: 'newbie', points: 10 }], // newbie also did 1 check-in in range
+  reviews: [],
+  triviaResponses: [],
+  triviaById,
+  signups: [
+    { user: 'newbie', usedReferralCode: 'FRIEND123' }, // signup + referral
+    { user: 'organic', usedReferralCode: '' },         // signup only (empty code)
+    { user: 'organic2' },                              // signup only (code undefined)
+  ],
+  signupBonus: SIGNUP_BONUS_POINTS,
+  refereePts,
+})
+const newbie = signupRes.get('newbie')
+eq('newbie signup points', newbie.signupPoints, SIGNUP_BONUS_POINTS)
+eq('newbie referral points (used a code)', newbie.referralPoints, refereePts)
+eq('newbie total = checkin + signup + referral', breakdownTotalPoints(newbie), 10 + SIGNUP_BONUS_POINTS + refereePts)
+reconciles('newbie', newbie)
+
+const organic = signupRes.get('organic')
+eq('organic signup points', organic.signupPoints, SIGNUP_BONUS_POINTS)
+eq('organic referral points (empty code -> 0)', organic.referralPoints, 0)
+reconciles('organic', organic)
+
+const organic2 = signupRes.get('organic2')
+eq('organic2 signup points', organic2.signupPoints, SIGNUP_BONUS_POINTS)
+eq('organic2 referral points (undefined code -> 0)', organic2.referralPoints, 0)
+
+// --- Case 8: omitting signups keeps signup/referral at 0 (back-compat with existing callers) ---
+const noSignups = aggregatePointsEarnedInRange({
+  checkins: [{ user: 'x', points: 5 }],
+  reviews: [],
+  triviaResponses: [],
+  triviaById,
+}).get('x')
+eq('no signups -> signupPoints 0', noSignups.signupPoints, 0)
+eq('no signups -> referralPoints 0', noSignups.referralPoints, 0)
+eq('no signups -> total unchanged', breakdownTotalPoints(noSignups), 5)
+reconciles('x', noSignups)
+
+// --- Case 9: a signup with no user id is skipped (no phantom user invented) ---
+const edge = aggregatePointsEarnedInRange({
+  checkins: [],
+  reviews: [],
+  triviaResponses: [],
+  triviaById,
+  signups: [{ user: undefined, usedReferralCode: 'X' }],
+  signupBonus: SIGNUP_BONUS_POINTS,
+  refereePts: 50,
+})
+eq('null-user signup skipped (no phantom user)', edge.size, 0)
 
 if (failures > 0) {
   console.error(`\n${failures} assertion(s) failed`)
