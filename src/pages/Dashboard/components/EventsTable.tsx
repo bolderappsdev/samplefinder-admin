@@ -4,6 +4,7 @@ import { Pagination, TableEmptyState, TableLoadingState } from '../../../compone
 interface Event {
   date: string
   venueName: string
+  locationName: string
   brand: string
   startTime: string
   endTime: string
@@ -87,7 +88,7 @@ const EventsTable = ({
               <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                 <div className="flex items-center gap-2">
                   <Icon icon="mdi:pin" className="w-4 h-4" />
-                  Event Name
+                  Location Name
                 </div>
               </th>
               <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
@@ -164,7 +165,9 @@ const EventsTable = ({
                 }}
               >
                 <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{event.date}</td>
-                <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{event.venueName}</td>
+                <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                  {event.locationName || <span className="text-gray-400">—</span>}
+                </td>
                 <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{event.brand}</td>
                 <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{event.startTime}</td>
                 <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{event.endTime}</td>

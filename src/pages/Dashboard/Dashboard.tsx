@@ -33,6 +33,7 @@ import {
 interface Event {
   date: string
   venueName: string
+  locationName: string
   brand: string
   startTime: string
   endTime: string
@@ -225,6 +226,7 @@ const Dashboard = () => {
       id: doc.$id,
       date: formatDate(doc.startTime || doc.date),
       venueName: doc.name || '',
+      locationName: doc.locationName || '',
       brand: '', // Will be populated from client relationship if needed
       startTime: formatTime(doc.startTime),
       endTime: formatTime(doc.endTime),
