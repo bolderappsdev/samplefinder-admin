@@ -3,7 +3,6 @@ import { Client, Databases, Query, Users } from 'node-appwrite';
 const DATABASE_ID = '69217af50038b9005a61';
 const CLIENTS_TABLE_ID = 'clients';
 const USER_PROFILES_TABLE_ID = 'user_profiles';
-const EVENTS_TABLE_ID = 'events';
 const REVIEWS_TABLE_ID = 'reviews';
 const TRIVIA_TABLE_ID = 'trivia';
 const CHECKINS_TABLE_ID = 'checkins';
@@ -76,6 +75,39 @@ function calculateChange(current, previous) {
         return current > 0 ? 100 : 0;
     return Math.round(((current - previous) / previous) * 100);
 }
+// listDocuments returns only 25 rows when no Query.limit is given — never
+// rely on that default when aggregating across a whole table.
+const USER_SCAN_PAGE_SIZE = 100;
+/**
+ * Sum lifetime points across every user profile.
+ *
+ * user_profiles.totalPoints is the canonical points counter — signup bonus,
+ * referrals, trivia, check-ins and reviews all increment it — so aggregate
+ * stats must read it directly instead of reconstructing from per-source
+ * tables (which misses referral/signup/trivia points entirely).
+ * Exported for scripts/verify-avg-points.mjs.
+ */
+export async function sumUserTotalPoints(databases) {
+    let sum = 0;
+    let cursor = null;
+    for (;;) {
+        const queries = [
+            Query.limit(USER_SCAN_PAGE_SIZE),
+            Query.select(['$id', 'totalPoints']),
+        ];
+        if (cursor) {
+            queries.push(Query.cursorAfter(cursor));
+        }
+        const page = await databases.listDocuments(DATABASE_ID, USER_PROFILES_TABLE_ID, queries);
+        for (const profile of page.documents) {
+            sum += profile.totalPoints || 0;
+        }
+        if (page.documents.length < USER_SCAN_PAGE_SIZE)
+            break;
+        cursor = page.documents[page.documents.length - 1].$id;
+    }
+    return sum;
+}
 /**
  * Get Dashboard Statistics
  */
@@ -89,50 +121,16 @@ async function getDashboardStats(databases, log) {
         // Total Users
         const usersResponse = await databases.listDocuments(DATABASE_ID, USER_PROFILES_TABLE_ID);
         const totalUsers = usersResponse.total;
-        // Total Points Awarded - sum of actual points earned from reviews and check-ins
-        let totalPointsAwarded = 0;
-        // Sum points from reviews (actual points awarded)
-        const reviewsResponse = await databases.listDocuments(DATABASE_ID, REVIEWS_TABLE_ID);
-        for (const review of reviewsResponse.documents) {
-            const pointsEarned = review.pointsEarned || 0;
-            totalPointsAwarded += pointsEarned;
-        }
-        // Sum points from check-ins
-        // Note: This assumes checkins table has either:
-        // 1. A 'points' field with actual points awarded, OR
-        // 2. An 'event' relationship field to get checkInPoints from the event
-        const checkinsResponse = await databases.listDocuments(DATABASE_ID, CHECKINS_TABLE_ID);
-        // If checkins table has a 'points' field, sum it directly
-        // Otherwise, calculate based on event relationship
-        for (const checkin of checkinsResponse.documents) {
-            // Try to get points from checkin record directly
-            if (checkin.points !== undefined) {
-                totalPointsAwarded += checkin.points || 0;
-            }
-            else if (checkin.event) {
-                // If checkin has event relationship, get the event's checkInPoints
-                try {
-                    const eventRef = checkin.event;
-                    const eventId = typeof eventRef === 'string'
-                        ? eventRef
-                        : eventRef?.$id || eventRef?.id;
-                    if (eventId) {
-                        const eventDoc = await databases.getDocument(DATABASE_ID, EVENTS_TABLE_ID, eventId);
-                        const checkInPoints = eventDoc.checkInPoints || 0;
-                        totalPointsAwarded += checkInPoints;
-                    }
-                }
-                catch (err) {
-                    // Event not found or error fetching - skip this check-in
-                    log(`Error fetching event for check-in ${checkin.$id}: ${err}`);
-                }
-            }
-        }
+        // Total Points Awarded - sum of the canonical lifetime counter on
+        // user_profiles (covers signup bonus, referrals, trivia, check-ins, reviews)
+        const totalPointsAwarded = await sumUserTotalPoints(databases);
         // Average PPU (Points Per User)
         const averagePPU = totalUsers > 0 ? Math.round(totalPointsAwarded / totalUsers) : 0;
-        // Total Check-ins - count from checkins table (reuse the response we already fetched)
+        // Total Check-ins - only the count is needed
+        const checkinsResponse = await databases.listDocuments(DATABASE_ID, CHECKINS_TABLE_ID, [Query.limit(1)]);
         const totalCheckins = checkinsResponse.total;
-        // Reviews count
+        // Reviews count - only the count is needed
+        const reviewsResponse = await databases.listDocuments(DATABASE_ID, REVIEWS_TABLE_ID, [Query.limit(1)]);
         const reviews = reviewsResponse.total;
         // Calculate changes (comparing this month vs last month)
         // For simplicity, we'll use current totals vs previous month totals
@@ -206,46 +204,8 @@ async function getUsersStats(databases, log) {
         // Users in Blacklist (isBlocked = true)
         const blockedUsersResponse = await databases.listDocuments(DATABASE_ID, USER_PROFILES_TABLE_ID, [Query.equal('isBlocked', true)]);
         const usersInBlacklist = blockedUsersResponse.total;
-        // Avg Points - calculate average points per user
-        // Use the same calculation as dashboard: sum actual points from reviews and check-ins
-        let totalPoints = 0;
-        // Sum points from reviews (actual points awarded)
-        const reviewsResponse = await databases.listDocuments(DATABASE_ID, REVIEWS_TABLE_ID);
-        for (const review of reviewsResponse.documents) {
-            const pointsEarned = review.pointsEarned || 0;
-            totalPoints += pointsEarned;
-        }
-        // Sum points from check-ins
-        // Note: This assumes checkins table has either:
-        // 1. A 'points' field with actual points awarded, OR
-        // 2. An 'event' relationship field to get checkInPoints from the event
-        const checkinsResponse = await databases.listDocuments(DATABASE_ID, CHECKINS_TABLE_ID);
-        // If checkins table has a 'points' field, sum it directly
-        // Otherwise, calculate based on event relationship
-        for (const checkin of checkinsResponse.documents) {
-            // Try to get points from checkin record directly
-            if (checkin.points !== undefined) {
-                totalPoints += checkin.points || 0;
-            }
-            else if (checkin.event) {
-                // If checkin has event relationship, get the event's checkInPoints
-                try {
-                    const eventRef = checkin.event;
-                    const eventId = typeof eventRef === 'string'
-                        ? eventRef
-                        : eventRef?.$id || eventRef?.id;
-                    if (eventId) {
-                        const eventDoc = await databases.getDocument(DATABASE_ID, EVENTS_TABLE_ID, eventId);
-                        const checkInPoints = eventDoc.checkInPoints || 0;
-                        totalPoints += checkInPoints;
-                    }
-                }
-                catch (err) {
-                    // Event not found or error fetching - skip this check-in
-                    log(`Error fetching event for check-in ${checkin.$id}: ${err}`);
-                }
-            }
-        }
+        // Avg Points - average of the canonical lifetime counter on user_profiles
+        const totalPoints = await sumUserTotalPoints(databases);
         const avgPoints = totalUsers > 0 ? Math.round(totalPoints / totalUsers) : 0;
         return {
             totalUsers,
@@ -265,14 +225,10 @@ async function getUsersStats(databases, log) {
 async function getNotificationsStats(databases, log) {
     try {
         // Total Sent: count documents with status = 'Sent'
-        const sentResponse = await databases.listDocuments(DATABASE_ID, NOTIFICATIONS_TABLE_ID, [
-            Query.equal('status', 'Sent'),
-        ]);
+        const sentResponse = await databases.listDocuments(DATABASE_ID, NOTIFICATIONS_TABLE_ID, [Query.equal('status', 'Sent')]);
         const totalSent = sentResponse.total;
         // Scheduled: count documents with status = 'Scheduled'
-        const scheduledResponse = await databases.listDocuments(DATABASE_ID, NOTIFICATIONS_TABLE_ID, [
-            Query.equal('status', 'Scheduled'),
-        ]);
+        const scheduledResponse = await databases.listDocuments(DATABASE_ID, NOTIFICATIONS_TABLE_ID, [Query.equal('status', 'Scheduled')]);
         const scheduled = scheduledResponse.total;
         // Avg Open Rate and Click Rate
         // These would typically come from notification tracking fields
