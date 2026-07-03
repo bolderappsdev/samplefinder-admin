@@ -50,7 +50,6 @@ interface TriviaStats {
 const DATABASE_ID = '69217af50038b9005a61';
 const CLIENTS_TABLE_ID = 'clients';
 const USER_PROFILES_TABLE_ID = 'user_profiles';
-const EVENTS_TABLE_ID = 'events';
 const REVIEWS_TABLE_ID = 'reviews';
 const TRIVIA_TABLE_ID = 'trivia';
 const CHECKINS_TABLE_ID = 'checkins';
@@ -137,6 +136,44 @@ function calculateChange(current: number, previous: number): number {
   return Math.round(((current - previous) / previous) * 100);
 }
 
+// listDocuments returns only 25 rows when no Query.limit is given — never
+// rely on that default when aggregating across a whole table.
+const USER_SCAN_PAGE_SIZE = 100;
+
+/**
+ * Sum lifetime points across every user profile.
+ *
+ * user_profiles.totalPoints is the canonical points counter — signup bonus,
+ * referrals, trivia, check-ins and reviews all increment it — so aggregate
+ * stats must read it directly instead of reconstructing from per-source
+ * tables (which misses referral/signup/trivia points entirely).
+ * Exported for scripts/verify-avg-points.mjs.
+ */
+export async function sumUserTotalPoints(databases: Databases): Promise<number> {
+  let sum = 0;
+  let cursor: string | null = null;
+  for (;;) {
+    const queries = [
+      Query.limit(USER_SCAN_PAGE_SIZE),
+      Query.select(['$id', 'totalPoints']),
+    ];
+    if (cursor) {
+      queries.push(Query.cursorAfter(cursor));
+    }
+    const page = await databases.listDocuments(
+      DATABASE_ID,
+      USER_PROFILES_TABLE_ID,
+      queries
+    );
+    for (const profile of page.documents) {
+      sum += (profile.totalPoints as number) || 0;
+    }
+    if (page.documents.length < USER_SCAN_PAGE_SIZE) break;
+    cursor = page.documents[page.documents.length - 1].$id;
+  }
+  return sum;
+}
+
 /**
  * Get Dashboard Statistics
  */
@@ -162,67 +199,28 @@ async function getDashboardStats(
     );
     const totalUsers = usersResponse.total;
 
-    // Total Points Awarded - sum of actual points earned from reviews and check-ins
-    let totalPointsAwarded = 0;
-
-    // Sum points from reviews (actual points awarded)
-    const reviewsResponse = await databases.listDocuments(
-      DATABASE_ID,
-      REVIEWS_TABLE_ID
-    );
-    for (const review of reviewsResponse.documents) {
-      const pointsEarned = (review.pointsEarned as number) || 0;
-      totalPointsAwarded += pointsEarned;
-    }
-
-    // Sum points from check-ins
-    // Note: This assumes checkins table has either:
-    // 1. A 'points' field with actual points awarded, OR
-    // 2. An 'event' relationship field to get checkInPoints from the event
-    const checkinsResponse = await databases.listDocuments(
-      DATABASE_ID,
-      CHECKINS_TABLE_ID
-    );
-
-    // If checkins table has a 'points' field, sum it directly
-    // Otherwise, calculate based on event relationship
-    for (const checkin of checkinsResponse.documents) {
-      // Try to get points from checkin record directly
-      if (checkin.points !== undefined) {
-        totalPointsAwarded += (checkin.points as number) || 0;
-      } else if (checkin.event) {
-        // If checkin has event relationship, get the event's checkInPoints
-        try {
-          const eventRef = checkin.event as { $id?: string; id?: string } | string | null;
-          const eventId =
-            typeof eventRef === 'string'
-              ? eventRef
-              : eventRef?.$id || eventRef?.id;
-
-          if (eventId) {
-            const eventDoc = await databases.getDocument(
-              DATABASE_ID,
-              EVENTS_TABLE_ID,
-              eventId
-            );
-            const checkInPoints = (eventDoc.checkInPoints as number) || 0;
-            totalPointsAwarded += checkInPoints;
-          }
-        } catch (err) {
-          // Event not found or error fetching - skip this check-in
-          log(`Error fetching event for check-in ${checkin.$id}: ${err}`);
-        }
-      }
-    }
+    // Total Points Awarded - sum of the canonical lifetime counter on
+    // user_profiles (covers signup bonus, referrals, trivia, check-ins, reviews)
+    const totalPointsAwarded = await sumUserTotalPoints(databases);
 
     // Average PPU (Points Per User)
     const averagePPU =
       totalUsers > 0 ? Math.round(totalPointsAwarded / totalUsers) : 0;
 
-    // Total Check-ins - count from checkins table (reuse the response we already fetched)
+    // Total Check-ins - only the count is needed
+    const checkinsResponse = await databases.listDocuments(
+      DATABASE_ID,
+      CHECKINS_TABLE_ID,
+      [Query.limit(1)]
+    );
     const totalCheckins = checkinsResponse.total;
 
-    // Reviews count
+    // Reviews count - only the count is needed
+    const reviewsResponse = await databases.listDocuments(
+      DATABASE_ID,
+      REVIEWS_TABLE_ID,
+      [Query.limit(1)]
+    );
     const reviews = reviewsResponse.total;
 
     // Calculate changes (comparing this month vs last month)
@@ -341,60 +339,8 @@ async function getUsersStats(
     );
     const usersInBlacklist = blockedUsersResponse.total;
 
-    // Avg Points - calculate average points per user
-    // Use the same calculation as dashboard: sum actual points from reviews and check-ins
-    let totalPoints = 0;
-
-    // Sum points from reviews (actual points awarded)
-    const reviewsResponse = await databases.listDocuments(
-      DATABASE_ID,
-      REVIEWS_TABLE_ID
-    );
-    for (const review of reviewsResponse.documents) {
-      const pointsEarned = (review.pointsEarned as number) || 0;
-      totalPoints += pointsEarned;
-    }
-
-    // Sum points from check-ins
-    // Note: This assumes checkins table has either:
-    // 1. A 'points' field with actual points awarded, OR
-    // 2. An 'event' relationship field to get checkInPoints from the event
-    const checkinsResponse = await databases.listDocuments(
-      DATABASE_ID,
-      CHECKINS_TABLE_ID
-    );
-
-    // If checkins table has a 'points' field, sum it directly
-    // Otherwise, calculate based on event relationship
-    for (const checkin of checkinsResponse.documents) {
-      // Try to get points from checkin record directly
-      if (checkin.points !== undefined) {
-        totalPoints += (checkin.points as number) || 0;
-      } else if (checkin.event) {
-        // If checkin has event relationship, get the event's checkInPoints
-        try {
-          const eventRef = checkin.event as { $id?: string; id?: string } | string | null;
-          const eventId =
-            typeof eventRef === 'string'
-              ? eventRef
-              : eventRef?.$id || eventRef?.id;
-
-          if (eventId) {
-            const eventDoc = await databases.getDocument(
-              DATABASE_ID,
-              EVENTS_TABLE_ID,
-              eventId
-            );
-            const checkInPoints = (eventDoc.checkInPoints as number) || 0;
-            totalPoints += checkInPoints;
-          }
-        } catch (err) {
-          // Event not found or error fetching - skip this check-in
-          log(`Error fetching event for check-in ${checkin.$id}: ${err}`);
-        }
-      }
-    }
-
+    // Avg Points - average of the canonical lifetime counter on user_profiles
+    const totalPoints = await sumUserTotalPoints(databases);
     const avgPoints = totalUsers > 0 ? Math.round(totalPoints / totalUsers) : 0;
 
     return {
@@ -521,19 +467,24 @@ export default async function handler({ req, res, log, error }: any) {
     const projectId =
       process.env.APPWRITE_FUNCTION_PROJECT_ID || '691d4a54003b21bf0136';
 
+    // Prioritize custom APPWRITE_API_KEY for full scopes, fallback to function key
     const apiKey =
-      process.env.APPWRITE_FUNCTION_KEY ||
       process.env.APPWRITE_API_KEY ||
+      process.env.APPWRITE_FUNCTION_KEY ||
       req.headers['x-appwrite-key'] ||
       req.headers['x-appwrite-function-key'] ||
       '';
+
+    // Debug logging to identify which key is being used
+    log(`API Key source: ${process.env.APPWRITE_API_KEY ? 'APPWRITE_API_KEY' : process.env.APPWRITE_FUNCTION_KEY ? 'APPWRITE_FUNCTION_KEY' : 'headers or empty'}`);
+    log(`API Key present: ${apiKey ? 'yes (length: ' + apiKey.length + ')' : 'no'}`);
 
     if (!apiKey) {
       error('API key is missing');
       return res.json(
         {
           success: false,
-          error: 'Server configuration error: API key missing',
+          error: 'Server configuration error: API key missing. Please set APPWRITE_API_KEY environment variable.',
         },
         500
       );
@@ -672,6 +623,143 @@ export default async function handler({ req, res, log, error }: any) {
         emails: emailMap,
         lastLogins: lastLoginMap,
       });
+    }
+
+    // Handle block user endpoint
+    if (req.path === '/block-user' && req.method === 'POST') {
+      log('Processing block-user request');
+
+      const body = req.body as { userId?: string };
+
+      if (!body || !body.userId) {
+        return res.json(
+          {
+            success: false,
+            error: 'userId is required',
+          },
+          400
+        );
+      }
+
+      try {
+        const users = new Users(client);
+
+        // Get user profile to find authID
+        const userProfile = await databases.getDocument(
+          DATABASE_ID,
+          USER_PROFILES_TABLE_ID,
+          body.userId
+        );
+        const authID = userProfile.authID;
+
+        if (!authID) {
+          return res.json(
+            {
+              success: false,
+              error: 'User does not have an associated auth account',
+            },
+            400
+          );
+        }
+
+        // Update isBlocked in user_profiles
+        await databases.updateDocument(
+          DATABASE_ID,
+          USER_PROFILES_TABLE_ID,
+          body.userId,
+          { isBlocked: true }
+        );
+
+        // Block user in Appwrite Auth (status false = blocked)
+        await users.updateStatus(authID, false);
+
+        // Delete all sessions to force logout
+        await users.deleteSessions(authID);
+
+        log(`Successfully blocked user ${body.userId} (authID: ${authID})`);
+
+        return res.json({
+          success: true,
+          message: 'User blocked successfully',
+          userId: body.userId,
+        });
+      } catch (err) {
+        log(`Error blocking user: ${(err as Error).message}`);
+        return res.json(
+          {
+            success: false,
+            error: (err as Error).message,
+          },
+          500
+        );
+      }
+    }
+
+    // Handle unblock user endpoint
+    if (req.path === '/unblock-user' && req.method === 'POST') {
+      log('Processing unblock-user request');
+
+      const body = req.body as { userId?: string };
+
+      if (!body || !body.userId) {
+        return res.json(
+          {
+            success: false,
+            error: 'userId is required',
+          },
+          400
+        );
+      }
+
+      try {
+        const users = new Users(client);
+
+        // Get user profile to find authID
+        const userProfile = await databases.getDocument(
+          DATABASE_ID,
+          USER_PROFILES_TABLE_ID,
+          body.userId
+        );
+        const authID = userProfile.authID;
+
+        if (!authID) {
+          return res.json(
+            {
+              success: false,
+              error: 'User does not have an associated auth account',
+            },
+            400
+          );
+        }
+
+        // Update isBlocked in user_profiles
+        await databases.updateDocument(
+          DATABASE_ID,
+          USER_PROFILES_TABLE_ID,
+          body.userId,
+          { isBlocked: false }
+        );
+
+        // Unblock user in Appwrite Auth (status true = active)
+        await users.updateStatus(authID, true);
+
+        log(`Successfully unblocked user ${body.userId} (authID: ${authID})`);
+
+        return res.json({
+          success: true,
+          message: 'User unblocked successfully',
+          userId: body.userId,
+        });
+      } catch (err) {
+        log(`Error unblocking user: ${(err as Error).message}`);
+        return res.json(
+          {
+            success: false,
+            error: (err as Error).message,
+          },
+          500
+        );
+      }
     }
 
     // Handle update user tier endpoint
