@@ -133,7 +133,7 @@
             "entrypoint": "src/main.js",
             "commands": "npm install --include=dev && npm run build",
             "path": "functions/Notification functions",
-            "buildSpecification": "s-0.5vcpu-512mb",
+            "buildSpecification": "s-2vcpu-2gb",
             "runtimeSpecification": "s-0.5vcpu-512mb",
             "deploymentRetention": 0
         }
