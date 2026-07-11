@@ -996,7 +996,13 @@ async function checkAndSendNearbyFavoriteSampling(databases, messaging, log) {
             if (notified.includes(event.$id))
                 continue;
             const brandName = await getBrandName(clientId);
-            const pushResult = await sendPushNotificationToUsers(messaging, [user.authID], 'NEW SAMPLING EVENT NEAR YOU', `Heads up, ${brandName} has a sampling event coming up near you. Click to learn more!`, log, { eventId: event.$id, type: 'Promotional' });
+            // Prefer the event's store/location name (how events display in-app), fall back
+            // to city, then to a generic phrase so the sentence never renders a blank location.
+            const eventLocationName = typeof event.locationName === 'string' ? event.locationName.trim() : '';
+            const eventCity = typeof event.city === 'string' ? event.city.trim() : '';
+            const locationLabel = eventLocationName || eventCity || 'your area';
+            const nearbySamplingMessage = `Heads up, ${brandName} has a sampling event coming up in ${locationLabel}. Click to learn more!`;
+            const pushResult = await sendPushNotificationToUsers(messaging, [user.authID], 'NEW SAMPLING EVENT NEAR YOU', nearbySamplingMessage, log, { eventId: event.$id, type: 'Promotional' });
             if ((pushResult.sentCount ?? 0) === 0) {
                 log(`Nearby favorite: push failed for user ${user.$id} event ${event.$id}`);
                 continue;
@@ -1005,7 +1011,7 @@ async function checkAndSendNearbyFavoriteSampling(databases, messaging, log) {
                 id: ID.unique(),
                 type: 'Promotional',
                 title: 'NEW SAMPLING EVENT NEAR YOU',
-                message: `Heads up, ${brandName} has a sampling event coming up near you. Click to learn more!`,
+                message: nearbySamplingMessage,
                 isRead: false,
                 createdAt: new Date().toISOString(),
                 data: { eventId: event.$id, type: 'Promotional' },
@@ -1569,7 +1575,7 @@ export default async function handler({ req, res, log, error }) {
                 },
                 nearby_sampling: {
                     title: 'NEW SAMPLING EVENT NEAR YOU',
-                    body: 'Heads up, [Sample Brand] has a sampling event coming up near you. Click to learn more!',
+                    body: 'Heads up, [Sample Brand] has a sampling event coming up in [Location name]. Click to learn more!',
                     notifType: 'Promotional',
                 },
                 sampling_today: {

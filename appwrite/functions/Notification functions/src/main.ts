@@ -90,6 +90,8 @@ interface Event {
   endTime: string;
   city: string;
   address: string;
+  /** Store/location display name; may be blank on legacy events (falls back to city). */
+  locationName?: string;
   client?: string | { $id: string };
   isArchived?: boolean;
   isHidden?: boolean;
@@ -1564,11 +1566,19 @@ async function checkAndSendNearbyFavoriteSampling(
 
       const brandName = await getBrandName(clientId);
 
+      // Prefer the event's store/location name (how events display in-app), fall back
+      // to city, then to a generic phrase so the sentence never renders a blank location.
+      const eventLocationName =
+        typeof event.locationName === 'string' ? event.locationName.trim() : '';
+      const eventCity = typeof event.city === 'string' ? event.city.trim() : '';
+      const locationLabel = eventLocationName || eventCity || 'your area';
+      const nearbySamplingMessage = `Heads up, ${brandName} has a sampling event coming up in ${locationLabel}. Click to learn more!`;
+
       const pushResult = await sendPushNotificationToUsers(
         messaging,
         [user.authID],
         'NEW SAMPLING EVENT NEAR YOU',
-        `Heads up, ${brandName} has a sampling event coming up near you. Click to learn more!`,
+        nearbySamplingMessage,
         log,
         { eventId: event.$id, type: 'Promotional' }
       );
@@ -1585,7 +1595,7 @@ async function checkAndSendNearbyFavoriteSampling(
           id: ID.unique(),
           type: 'Promotional',
           title: 'NEW SAMPLING EVENT NEAR YOU',
-          message: `Heads up, ${brandName} has a sampling event coming up near you. Click to learn more!`,
+          message: nearbySamplingMessage,
           isRead: false,
           createdAt: new Date().toISOString(),
           data: { eventId: event.$id, type: 'Promotional' },
@@ -2452,7 +2462,7 @@ export default async function handler({ req, res, log, error }: HandlerContext) 
         },
         nearby_sampling: {
           title: 'NEW SAMPLING EVENT NEAR YOU',
-          body: 'Heads up, [Sample Brand] has a sampling event coming up near you. Click to learn more!',
+          body: 'Heads up, [Sample Brand] has a sampling event coming up in [Location name]. Click to learn more!',
           notifType: 'Promotional',
         },
         sampling_today: {
