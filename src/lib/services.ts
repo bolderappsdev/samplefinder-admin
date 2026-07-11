@@ -1,6 +1,7 @@
 import { databases, appwriteConfig, ID, Query, functions, ExecutionMethod } from './appwrite'
 import type { Models } from 'appwrite'
 import { DEFAULT_APP_TIMEZONE, appTimeToUTC } from './dateUtils'
+import { fetchAllPages } from './paginateAll'
 
 // Collection IDs
 export const COLLECTION_IDS = {
@@ -116,6 +117,36 @@ export class DatabaseService {
       total: filteredDocuments.length,
       documents: filteredDocuments,
     } as Models.DocumentList<T>
+  }
+
+  // Like search(), but pages through the ENTIRE collection (matching baseQueries) before filtering,
+  // so a match is never hidden outside a capped/paginated fetch window (the root cause of the admin
+  // "search only shows some results" bug). `baseQueries` should carry ordering/filters but NOT
+  // limit/offset/cursor — paging is handled here. Returns the full matched set; the caller paginates.
+  static async searchAll<T extends Models.Document>(
+    collectionId: string,
+    searchTerm: string,
+    searchFields: string[],
+    baseQueries: string[] = []
+  ): Promise<{ documents: T[]; total: number }> {
+    const all = await fetchAllPages<T>((cursor, limit) =>
+      this.list<T>(collectionId, [
+        ...baseQueries,
+        Query.limit(limit),
+        ...(cursor ? [Query.cursorAfter(cursor)] : []),
+      ])
+    )
+
+    const term = searchTerm.toLowerCase().trim()
+    if (!term) return { documents: all, total: all.length }
+
+    const filtered = all.filter((doc) =>
+      searchFields.some((field) => {
+        const value = (doc as Record<string, unknown>)[field]
+        return typeof value === 'string' && value.toLowerCase().includes(term)
+      })
+    )
+    return { documents: filtered, total: filtered.length }
   }
 
   // Get most recent document update time from a collection
@@ -650,6 +681,14 @@ export const categoriesService = {
       ['title'],
       queries
     ),
+  // Full-collection search (see DatabaseService.searchAll) — pass ordering in baseQueries, no limit/offset.
+  searchAll: (searchTerm: string, baseQueries?: string[]) =>
+    DatabaseService.searchAll<CategoryDocument>(
+      appwriteConfig.collections.categories || 'categories',
+      searchTerm,
+      ['title'],
+      baseQueries
+    ),
   findByTitle: async (title: string): Promise<CategoryDocument | null> => {
     const result = await DatabaseService.list<CategoryDocument>(
       appwriteConfig.collections.categories || 'categories',
@@ -756,6 +795,14 @@ export const triviaService = {
       ['question'],
       queries
     ),
+  // Full-collection search (see DatabaseService.searchAll) — pass ordering in baseQueries, no limit/offset.
+  searchAll: (searchTerm: string, baseQueries?: string[]) =>
+    DatabaseService.searchAll<TriviaDocument>(
+      appwriteConfig.collections.trivia,
+      searchTerm,
+      ['question'],
+      baseQueries
+    ),
   getWithClient: async (id: string): Promise<{ trivia: TriviaDocument; client: ClientDocument | null }> => {
     const trivia = await DatabaseService.getById<TriviaDocument>(appwriteConfig.collections.trivia, id)
     let client: ClientDocument | null = null
@@ -830,8 +877,16 @@ export interface AppUser extends UserProfile {
 const GET_USER_EMAILS_BATCH_SIZE = 25
 
 /**
+ * Max get-user-emails executions to run concurrently. Bounds the fan-out so fetching emails for a
+ * large user set (e.g. an admin search over the whole collection) doesn't fire hundreds of parallel
+ * Function executions at once, which risks rate limits / quota exhaustion.
+ */
+const GET_USER_EMAILS_CONCURRENCY = 5
+
+/**
  * Fetches emails and last login dates for auth IDs in batches to avoid function timeout.
- * Each batch runs in a separate execution so no single call exceeds the 30s limit.
+ * Each batch runs in a separate execution so no single call exceeds the 30s limit; batches are
+ * run in bounded-concurrency groups so the total parallel fan-out stays capped.
  */
 async function fetchUserEmailsInBatches(authIDs: string[]): Promise<{
   emailMap: Record<string, string>
@@ -846,31 +901,36 @@ async function fetchUserEmailsInBatches(authIDs: string[]): Promise<{
   for (let i = 0; i < authIDs.length; i += GET_USER_EMAILS_BATCH_SIZE) {
     chunks.push(authIDs.slice(i, i + GET_USER_EMAILS_BATCH_SIZE))
   }
-  const results = await Promise.all(
-    chunks.map(async (chunk) => {
-      const execution = await functions.createExecution({
-        functionId: appwriteConfig.functions.statisticsFunctionId,
-        xpath: '/get-user-emails',
-        method: ExecutionMethod.POST,
-        body: JSON.stringify({ authIDs: chunk }),
-        headers: { 'Content-Type': 'application/json' },
-      })
-      if (execution.status !== 'completed' || !execution.responseBody) return { emails: {} as Record<string, string>, lastLogins: {} as Record<string, string> }
-      try {
-        const response = JSON.parse(execution.responseBody)
-        if (!response.success) return { emails: {}, lastLogins: {} }
-        return {
-          emails: response.emails ?? {},
-          lastLogins: response.lastLogins ?? {},
-        }
-      } catch {
-        return { emails: {}, lastLogins: {} }
-      }
+
+  const runChunk = async (chunk: string[]) => {
+    const execution = await functions.createExecution({
+      functionId: appwriteConfig.functions.statisticsFunctionId,
+      xpath: '/get-user-emails',
+      method: ExecutionMethod.POST,
+      body: JSON.stringify({ authIDs: chunk }),
+      headers: { 'Content-Type': 'application/json' },
     })
-  )
-  for (const r of results) {
-    Object.assign(emailMap, r.emails)
-    Object.assign(lastLoginMap, r.lastLogins)
+    if (execution.status !== 'completed' || !execution.responseBody) return { emails: {} as Record<string, string>, lastLogins: {} as Record<string, string> }
+    try {
+      const response = JSON.parse(execution.responseBody)
+      if (!response.success) return { emails: {}, lastLogins: {} }
+      return {
+        emails: response.emails ?? {},
+        lastLogins: response.lastLogins ?? {},
+      }
+    } catch {
+      return { emails: {}, lastLogins: {} }
+    }
+  }
+
+  // Run chunks in bounded-concurrency groups so we never fire more than N executions at once.
+  for (let i = 0; i < chunks.length; i += GET_USER_EMAILS_CONCURRENCY) {
+    const group = chunks.slice(i, i + GET_USER_EMAILS_CONCURRENCY)
+    const groupResults = await Promise.all(group.map(runChunk))
+    for (const r of groupResults) {
+      Object.assign(emailMap, r.emails)
+      Object.assign(lastLoginMap, r.lastLogins)
+    }
   }
   return { emailMap, lastLoginMap }
 }
@@ -1127,6 +1187,57 @@ export const appUsersService = {
       }
     } catch (error) {
       console.error('Error listing users:', error)
+      throw error
+    }
+  },
+
+  /**
+   * Like listWithPagination, but pages through EVERY profile matching `queries` (not just the
+   * first 500) and fetches emails for all of them. Use for the search / client-side-sort paths so
+   * results are never capped to an arbitrary window — the cap is what let matches "disappear" until
+   * an unrelated filter/sort shifted the fetched window. Pass ordered queries WITHOUT
+   * Query.limit/cursor — paging is handled internally.
+   */
+  listAllWithPagination: async (queries: string[] = []): Promise<{ users: AppUser[]; total: number }> => {
+    try {
+      const allProfiles = await fetchAllPages<UserProfile>((cursor, limit) =>
+        userProfilesService.list([
+          ...queries,
+          Query.limit(limit),
+          ...(cursor ? [Query.cursorAfter(cursor)] : []),
+        ])
+      )
+
+      // Fetch Auth user emails and last login dates via Cloud Function (batched to avoid 30s timeout)
+      const authIDs = allProfiles
+        .map((profile) => (profile as { authID?: string }).authID)
+        .filter((id): id is string => !!id)
+
+      let emailMap: Record<string, string> = {}
+      let lastLoginMap: Record<string, string> = {}
+      try {
+        const result = await fetchUserEmailsInBatches(authIDs)
+        emailMap = result.emailMap
+        lastLoginMap = result.lastLoginMap
+      } catch (emailError) {
+        console.warn('Failed to fetch user emails:', emailError)
+        // Continue without emails rather than failing completely
+      }
+
+      const users = allProfiles.map((profile) => {
+        const authID = (profile as { authID?: string }).authID
+        return {
+          ...profile,
+          firstName: (profile as { firstname?: string }).firstname,
+          lastName: (profile as { lastname?: string }).lastname,
+          email: authID ? emailMap[authID] : undefined,
+          lastLoginDate: authID ? lastLoginMap[authID] : undefined,
+        }
+      }) as AppUser[]
+
+      return { users, total: allProfiles.length }
+    } catch (error) {
+      console.error('Error listing all users (paginated):', error)
       throw error
     }
   },
@@ -1766,6 +1877,14 @@ export const notificationsService = {
       ['title', 'message'],
       queries
     ),
+  // Full-collection search (see DatabaseService.searchAll) — pass ordering/filters in baseQueries, no limit/offset.
+  searchAll: (searchTerm: string, baseQueries?: string[]) =>
+    DatabaseService.searchAll<NotificationDocument>(
+      appwriteConfig.collections.notifications,
+      searchTerm,
+      ['title', 'message'],
+      baseQueries
+    ),
 
   // Send notification via Appwrite function
   sendNotification: async (notificationId: string): Promise<void> => {
@@ -2317,6 +2436,14 @@ export const locationsService = {
       searchTerm,
       ['name', 'address', 'city', 'state', 'zipCode'],
       queries
+    ),
+  // Full-collection search (see DatabaseService.searchAll) — pass ordering in baseQueries, no limit/offset.
+  searchAll: (searchTerm: string, baseQueries?: string[]) =>
+    DatabaseService.searchAll<LocationDocument>(
+      appwriteConfig.collections.locations,
+      searchTerm,
+      ['name', 'address', 'city', 'state', 'zipCode'],
+      baseQueries
     ),
   findByName: async (name: string): Promise<LocationDocument | null> => {
     const result = await DatabaseService.list<LocationDocument>(

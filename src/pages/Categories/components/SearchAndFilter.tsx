@@ -1,3 +1,4 @@
+import { useState, useEffect } from 'react'
 import { Icon } from '@iconify/react'
 
 interface SearchAndFilterProps {
@@ -17,6 +18,15 @@ const SearchAndFilter = ({
   sortOrder,
   onSortOrderChange,
 }: SearchAndFilterProps) => {
+  // Debounce the search input so each keystroke doesn't drive a full-collection searchAll fetch.
+  const [localSearchTerm, setLocalSearchTerm] = useState(searchTerm)
+  useEffect(() => {
+    const timer = setTimeout(() => onSearchChange(localSearchTerm), 300)
+    return () => clearTimeout(timer)
+  }, [localSearchTerm, onSearchChange])
+  useEffect(() => {
+    setLocalSearchTerm(searchTerm)
+  }, [searchTerm])
   const getSortDisplayText = () => {
     const sortLabels: Record<string, string> = {
       createdAt: 'Created Date',
@@ -39,8 +49,8 @@ const SearchAndFilter = ({
           <input
             type="text"
             placeholder="Search by category title..."
-            value={searchTerm}
-            onChange={(e) => onSearchChange(e.target.value)}
+            value={localSearchTerm}
+            onChange={(e) => setLocalSearchTerm(e.target.value)}
             className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#1D0A74] focus:border-transparent"
           />
         </div>

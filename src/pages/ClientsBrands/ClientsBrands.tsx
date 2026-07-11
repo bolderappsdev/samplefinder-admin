@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState, useRef } from 'react'
 import { ConfirmationModal, DashboardLayout } from '../../components'
 import { Query, storage, appwriteConfig, ID } from '../../lib/appwrite'
 import { clientsService, statisticsService, type ClientDocument, type ClientsStats } from '../../lib/services'
+import { fetchAllPages } from '../../lib/paginateAll'
 import { useNotificationStore } from '../../stores/notificationStore'
 import { useTimezoneStore } from '../../stores/timezoneStore'
 import { formatDateInAppTimezone } from '../../lib/dateUtils'
@@ -96,23 +97,25 @@ const ClientsBrands = () => {
   const [searchTerm, setSearchTerm] = useState('')
   const [sortBy, setSortBy] = useState<string>('$createdAt')
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc')
+  // Only the latest fetch may commit — the stats-sort path now pages the full set + computes stats
+  // (multiple round-trips), so a slower earlier fetch could otherwise resolve after a newer one.
+  const fetchIdRef = useRef(0)
 
   // Fetch clients from Appwrite with pagination, search, and sorting
   const fetchClients = async (page: number = currentPage) => {
+    const thisFetchId = ++fetchIdRef.current
     try {
       setIsLoading(true)
       setError(null)
       
-      // Build base queries
-      const queries: string[] = []
-      
-      // Apply search using Query.contains (doesn't require fulltext indexes)
+      // Base queries: search filter (Query.contains is server-side, no fulltext index needed) + order.
+      // No limit/offset here — added per-branch below.
+      const baseQueries: string[] = []
       if (searchTerm.trim()) {
-        const trimmedSearch = searchTerm.trim()
-        queries.push(Query.contains('name', trimmedSearch))
+        baseQueries.push(Query.contains('name', searchTerm.trim()))
       }
-      
-      // Stats-based sort (totalEvents, numberOfFavorites, etc.) requires fetching more and sorting client-side
+
+      // Stats-based sort (totalEvents, numberOfFavorites, etc.) is computed client-side
       const isStatsSort =
         sortBy === 'totalEvents' ||
         sortBy === 'numberOfFavorites' ||
@@ -121,27 +124,39 @@ const ClientsBrands = () => {
 
       if (!isStatsSort) {
         const orderMethod = sortOrder === 'asc' ? Query.orderAsc : Query.orderDesc
-        if (sortBy === 'name') {
-          queries.push(orderMethod('name'))
-        } else {
-          queries.push(orderMethod('$createdAt'))
-        }
+        baseQueries.push(sortBy === 'name' ? orderMethod('name') : orderMethod('$createdAt'))
       } else {
-        queries.push(Query.orderDesc('$createdAt')) // default order for the big fetch
+        baseQueries.push(Query.orderDesc('$createdAt')) // stable order for the full fetch
       }
 
+      let result: { documents: ClientDocument[]; total: number }
       if (isStatsSort) {
-        queries.push(Query.limit(500))
-        queries.push(Query.offset(0))
+        // Stats sorts rank on client-computed values, so they must cover the FULL set — a capped
+        // 500-row fetch dropped clients beyond it (and let an unrelated change "reveal" more).
+        // getClientsStats already scans events/reviews/users collection-wide, so covering every
+        // client adds little cost.
+        const allClients = await fetchAllPages<ClientDocument>((cursor, limit) =>
+          clientsService.list([
+            ...baseQueries,
+            Query.limit(limit),
+            ...(cursor ? [Query.cursorAfter(cursor)] : []),
+          ])
+        )
+        result = { documents: allClients, total: allClients.length }
       } else {
-        queries.push(Query.limit(pageSize))
-        queries.push(Query.offset((page - 1) * pageSize))
+        result = await clientsService.list([
+          ...baseQueries,
+          Query.limit(pageSize),
+          Query.offset((page - 1) * pageSize),
+        ])
       }
-
-      const result = await clientsService.list(queries)
 
       const clientIds = result.documents.map(doc => doc.$id)
       const statsMap = await clientsService.getClientsStats(clientIds)
+
+      // Discard this result if a newer fetch has started (avoids stale overwrite). Everything below
+      // is synchronous, so one check here covers both the stats-sort and plain branches.
+      if (thisFetchId !== fetchIdRef.current) return
 
       let transformedClients = result.documents.map(doc => {
         const stats = statsMap.get(doc.$id)
@@ -184,7 +199,9 @@ const ClientsBrands = () => {
       console.error('Error fetching clients:', err)
       setError('Failed to load clients. Please try again.')
     } finally {
-      setIsLoading(false)
+      if (thisFetchId === fetchIdRef.current) {
+        setIsLoading(false)
+      }
     }
   }
 
