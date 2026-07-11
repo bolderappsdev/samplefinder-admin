@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import type { Models } from 'appwrite'
 import { DashboardLayout, ShimmerPage, ConfirmationModal } from '../../components'
@@ -18,6 +18,7 @@ import {
 import { getEventStatus, getEventStatusColor, generateUniqueCheckInCode } from '../../lib/eventUtils'
 import type { EventDocument } from '../../lib/services'
 import { Query } from '../../lib/appwrite'
+import { fetchAllPages } from '../../lib/paginateAll'
 import {
   MetricsCards,
   SearchAndFilter,
@@ -133,6 +134,10 @@ const Dashboard = () => {
   const { addNotification } = useNotificationStore()
   const { appTimezone } = useTimezoneStore()
   const [statistics, setStatistics] = useState<DashboardStats | null>(null)
+  // Guards against out-of-order fetch results: search/status paths now page through the full set
+  // (multiple round-trips), so a slower earlier fetch can resolve after a newer one. Only the latest
+  // fetch is allowed to commit its results. Mirrors the same guard in Users.tsx.
+  const fetchIdRef = useRef(0)
 
   // Helper functions for formatting
   const formatNumber = (num: number): string => {
@@ -239,9 +244,10 @@ const Dashboard = () => {
 
   // Fetch events from database with pagination, search, filter, and sort
   const fetchEvents = async (page: number = currentPage) => {
+    const thisFetchId = ++fetchIdRef.current
     try {
       setIsLoading(true)
-      
+
       // Build base queries
       const queries: string[] = []
       
@@ -298,20 +304,30 @@ const Dashboard = () => {
       // Determine if we're searching or filtering by derived status (Active / Inactive)
       const isSearching = searchTerm.trim().length > 0
       const needsClientSideStatusFilter = statusFilter === 'active' || statusFilter === 'in_active'
-      
-      // When searching or filtering by Active/Inactive, fetch more records for client-side filtering, then paginate
+
+      // When searching or filtering by a derived status, results are filtered client-side, so we
+      // must evaluate EVERY matching event — not a capped window. Otherwise a match outside the
+      // fetched window (e.g. an active event whose future start time sorts it last) stays invisible
+      // until an unrelated filter or date range shifts the window. Plain browsing keeps efficient
+      // server-side pagination.
+      let result: { documents: EventDocument[]; total: number }
       if (!isSearching && !needsClientSideStatusFilter) {
-        queries.push(Query.limit(pageSize))
-        queries.push(Query.offset((page - 1) * pageSize))
+        const pagedQueries = [...queries, Query.limit(pageSize), Query.offset((page - 1) * pageSize)]
+        result = await eventsService.list(pagedQueries)
       } else {
-        // Fetch up to 500 records for client-side filtering
-        queries.push(Query.limit(500))
+        const allDocuments = await fetchAllPages<EventDocument>((cursor, limit) =>
+          eventsService.list([
+            ...queries,
+            Query.limit(limit),
+            ...(cursor ? [Query.cursorAfter(cursor)] : []),
+          ])
+        )
+        result = { documents: allDocuments, total: allDocuments.length }
       }
-      
-      // Fetch events with filters
-      // When searching: use list() then filter by search term (including brand name) after resolving clients
-      // When not searching: use list() with server-side pagination
-      const result = await eventsService.list(queries)
+
+      // A newer fetch superseded this one while it was in flight — discard it before doing the
+      // DB writes and state commits below (otherwise the stale result can overwrite the fresh one).
+      if (thisFetchId !== fetchIdRef.current) return
 
       // Auto-transition expired hidden events to inactive by clearing hidden flag in DB.
       const now = new Date()
@@ -321,9 +337,13 @@ const Dashboard = () => {
         return !!eventEnd && !isNaN(eventEnd.getTime()) && now > eventEnd
       })
       if (hiddenExpiredEvents.length > 0) {
-        await Promise.all(
-          hiddenExpiredEvents.map((doc) => eventsService.update(doc.$id, { isHidden: false }))
-        )
+        // Write in bounded-concurrency chunks: search/status paths now scan the full set, so this
+        // could otherwise fire a large burst of concurrent PATCH requests in one pass.
+        const UPDATE_CHUNK = 20
+        for (let i = 0; i < hiddenExpiredEvents.length; i += UPDATE_CHUNK) {
+          const group = hiddenExpiredEvents.slice(i, i + UPDATE_CHUNK)
+          await Promise.all(group.map((doc) => eventsService.update(doc.$id, { isHidden: false })))
+        }
         hiddenExpiredEvents.forEach((doc) => {
           doc.isHidden = false
         })
@@ -386,6 +406,8 @@ const Dashboard = () => {
       // Pagination: when searching or status filter (Active/Inactive) use filtered count; otherwise use result.total
       const total = isSearching || needsClientSideStatusFilter ? mappedEvents.length : result.total
       const totalPagesCount = Math.ceil(total / pageSize)
+      // Re-check: a newer fetch may have started during the awaits above. Only the latest commits.
+      if (thisFetchId !== fetchIdRef.current) return
       setTotalEvents(total)
       setTotalPages(totalPagesCount)
 
@@ -423,8 +445,12 @@ const Dashboard = () => {
       })
       console.error('Error fetching events:', err)
     } finally {
-      setIsLoading(false)
-      setIsInitialLoad(false)
+      // Only the latest fetch clears the loading state, so a stale fetch can't hide the spinner
+      // while a newer one is still running.
+      if (thisFetchId === fetchIdRef.current) {
+        setIsLoading(false)
+        setIsInitialLoad(false)
+      }
     }
   }
 

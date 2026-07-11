@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { DashboardLayout, ConfirmationModal } from '../../components'
 import type { ConfirmationType } from '../../components'
 import {
@@ -121,32 +121,44 @@ const Notifications = () => {
     }
   }
 
+  // Only the latest fetch may commit — search now pages the full set (multiple round-trips), so a
+  // slower earlier fetch could otherwise resolve after a newer one and overwrite it.
+  const fetchIdRef = useRef(0)
+
   // Fetch notifications with pagination
   const fetchNotifications = useCallback(async (page: number = currentPage) => {
+    const thisFetchId = ++fetchIdRef.current
     try {
       setIsLoading(true)
-      const queries: string[] = []
-      
+      const baseQueries: string[] = []
+
       // Add type filter if not "All Types"
       if (typeFilter !== 'All Types') {
-        queries.push(Query.equal('type', [typeFilter]))
+        baseQueries.push(Query.equal('type', [typeFilter]))
       }
-      
+
       // Order by creation date (newest first)
-      queries.push(Query.orderDesc('$createdAt'))
-      
-      // Add pagination queries
-      queries.push(Query.limit(pageSize))
-      queries.push(Query.offset((page - 1) * pageSize))
-      
-      const response = await notificationsService.list(queries)
-      
-      // Extract pagination metadata (before client-side filtering)
+      baseQueries.push(Query.orderDesc('$createdAt'))
+
+      const trimmedSearch = searchQuery.trim()
+      const isSearching = trimmedSearch.length > 0
+
+      // Searching filters client-side (title/message), so it must scan the FULL set (searchAll pages
+      // through everything, honoring the type filter) — not just the current page, which hid matches
+      // on later pages. Browsing keeps efficient server-side pagination.
+      const response = isSearching
+        ? await notificationsService.searchAll(trimmedSearch, baseQueries)
+        : await notificationsService.list([...baseQueries, Query.limit(pageSize), Query.offset((page - 1) * pageSize)])
+
+      // Discard this result if a newer fetch has started (avoids stale overwrite).
+      if (thisFetchId !== fetchIdRef.current) return
+
+      // Extract pagination metadata
       const total = response.total
       const totalPagesCount = Math.ceil(total / pageSize)
       setTotalNotifications(total)
       setTotalPages(totalPagesCount)
-      
+
       // Handle edge case: if current page exceeds total pages, reset to last valid page or page 1
       if (totalPagesCount > 0 && page > totalPagesCount) {
         const lastValidPage = totalPagesCount
@@ -157,20 +169,12 @@ const Notifications = () => {
       } else if (totalPagesCount === 0) {
         setCurrentPage(1)
       }
-      
-      // Filter by search query on client side (since search might not work with all Appwrite setups)
-      // Note: This filters the paginated results, so pagination shows pages of filtered results
-      let filteredDocs = response.documents
-      if (searchQuery) {
-        const searchLower = searchQuery.toLowerCase()
-        filteredDocs = response.documents.filter(
-          (doc) =>
-            doc.title.toLowerCase().includes(searchLower) ||
-            doc.message.toLowerCase().includes(searchLower)
-        )
-      }
-      
-      const convertedNotifications = filteredDocs.map(convertNotification)
+
+      // Search returns the full matched set — paginate it client-side; browsing is already one page.
+      const pageDocs = isSearching
+        ? response.documents.slice((page - 1) * pageSize, page * pageSize)
+        : response.documents
+      const convertedNotifications = pageDocs.map(convertNotification)
       setNotifications(convertedNotifications)
       setCurrentPage(page)
     } catch (err) {
@@ -181,7 +185,9 @@ const Notifications = () => {
         message: 'Failed to load notifications. Please refresh the page.',
       })
     } finally {
-      setIsLoading(false)
+      if (thisFetchId === fetchIdRef.current) {
+        setIsLoading(false)
+      }
     }
   }, [typeFilter, searchQuery, addNotification, currentPage, pageSize])
 

@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import type { Models } from 'appwrite'
 import {
@@ -14,7 +14,7 @@ import {
   EditTriviaModal,
   StatsCards,
 } from './components'
-import { triviaService, triviaResponsesService, clientsService, statisticsService, userProfilesService, isCorrectTriviaResponse, type TriviaStats, type TriviaDocument as ServiceTriviaDocument, type ClientDocument, type UserProfile } from '../../lib/services'
+import { triviaService, triviaResponsesService, clientsService, statisticsService, userProfilesService, isCorrectTriviaResponse, type TriviaStats, type TriviaDocument as ServiceTriviaDocument, type TriviaResponseDocument, type ClientDocument, type UserProfile } from '../../lib/services'
 import type { TriviaWinner } from './components/TriviaTable'
 import { useNotificationStore } from '../../stores/notificationStore'
 import { useTimezoneStore } from '../../stores/timezoneStore'
@@ -62,6 +62,10 @@ const Trivia = () => {
   const [pageSize] = useState(25)
   const [totalTrivia, setTotalTrivia] = useState(0)
   const [totalPages, setTotalPages] = useState(0)
+  // Only the latest fetch may commit — search/computed-sort now page the full set (multiple
+  // round-trips), so a slower earlier fetch could otherwise resolve after a newer one and overwrite
+  // it (or recurse on stale state). Guarded before every setState that reflects results.
+  const fetchIdRef = useRef(0)
 
   // Fetch clients map for displaying client names
   const fetchClients = async () => {
@@ -168,6 +172,7 @@ const Trivia = () => {
 
   // Fetch trivia from Appwrite with statistics and pagination
   const fetchTrivia = async (page: number = currentPage, isInitial: boolean = false) => {
+    const thisFetchId = ++fetchIdRef.current
     try {
       if (isInitial) {
         setIsInitialLoading(true)
@@ -181,100 +186,153 @@ const Trivia = () => {
         await fetchClients()
       }
       
-      // Build pagination queries
-      const paginationQueries = [
-        Query.limit(pageSize),
-        Query.offset((page - 1) * pageSize),
-        Query.orderDesc('startDate'), // Most recent trivia first
-      ]
-      
-      let result
-      if (searchQuery.trim()) {
-        // Use search if there's a query (search already includes pagination)
-        result = await triviaService.search(searchQuery.trim(), paginationQueries)
-      } else {
-        // Otherwise fetch with pagination
-        result = await triviaService.list(paginationQueries)
-      }
-      
-      // Extract pagination metadata
-      const total = result.total
-      const totalPagesCount = Math.ceil(total / pageSize)
-      setTotalTrivia(total)
-      setTotalPages(totalPagesCount)
-      
-      // Handle edge case: if current page exceeds total pages, reset to last valid page or page 1
-      if (totalPagesCount > 0 && page > totalPagesCount) {
-        const lastValidPage = totalPagesCount
-        setCurrentPage(lastValidPage)
-        if (page !== lastValidPage) {
-          return fetchTrivia(lastValidPage, false)
-        }
-      } else if (totalPagesCount === 0) {
-        setCurrentPage(1)
-      }
-
-      // Fetch responses for all trivia in parallel
-      const documents = result.documents as TriviaDocument[]
-      const responsesPromises = documents.map((doc) => 
-        triviaResponsesService.getByTriviaId(doc.$id).catch(() => [])
-      )
-      const responsesArrays = await Promise.all(responsesPromises)
-
-      // Transform with statistics
-      const transformedPromises = documents.map((doc, index) => 
-        transformToUITrivia(doc, responsesArrays[index])
-      )
-      const transformedTrivia = await Promise.all(transformedPromises)
-
-      // Apply sorting - sort by original document dates, not formatted strings
-      let sortedTrivia = [...transformedTrivia]
+      const trimmedSearch = searchQuery.trim()
+      const isSearching = trimmedSearch.length > 0
       const direction = sortOrder === 'asc' ? 1 : -1
-      if (sortBy === 'date') {
-        // Sort using original documents before transformation
-        const triviaWithDates = documents.map((doc, index) => ({
-          trivia: transformedTrivia[index],
-          date: doc.startDate ? new Date(doc.startDate).getTime() : (doc.$createdAt ? new Date(doc.$createdAt).getTime() : 0)
-        }))
-        triviaWithDates.sort((a, b) => direction * (a.date - b.date))
-        sortedTrivia = triviaWithDates.map(item => item.trivia)
-      } else if (sortBy === 'status') {
-        sortedTrivia.sort((a, b) => {
-          return direction * a.status.localeCompare(b.status)
-        })
-      } else if (sortBy === 'responses') {
-        sortedTrivia.sort((a, b) => {
-          return direction * (a.responses - b.responses)
-        })
-      } else if (sortBy === 'name') {
-        sortedTrivia.sort((a, b) => {
-          return (
-            direction *
-            a.question.localeCompare(b.question, undefined, {
-              sensitivity: 'base',
-            })
-          )
-        })
-      } else if (sortBy === 'view') {
-        sortedTrivia.sort((a, b) => direction * (a.view - b.view))
-      } else if (sortBy === 'skip') {
-        sortedTrivia.sort((a, b) => direction * (a.skip - b.skip))
-      } else if (sortBy === 'incorrect') {
-        sortedTrivia.sort((a, b) => direction * (a.incorrect - b.incorrect))
-      } else if (sortBy === 'winners') {
-        sortedTrivia.sort((a, b) => direction * (a.winnersCount - b.winnersCount))
+
+      // Sort fields split into server-orderable (stored on the trivia doc) vs. client-computed.
+      const serverOrderField: Record<string, string> = { date: 'startDate', name: 'question', skip: 'skips' }
+      const isComputedSort = !(sortBy in serverOrderField)
+      const needsResponsesForSort =
+        sortBy === 'responses' || sortBy === 'view' || sortBy === 'incorrect' || sortBy === 'winners'
+      // Search and computed sorts must operate over the FULL set: a single fetched page would search
+      // and sort only ~25 rows, hiding matches and mis-ordering across pages. Browsing by a
+      // server-orderable field keeps efficient server-side pagination.
+      const needFullSet = isSearching || isComputedSort
+
+      const statusOf = (doc: TriviaDocument): 'Scheduled' | 'Active' | 'Completed' | 'Draft' => {
+        const now = new Date()
+        const start = doc.startDate ? new Date(doc.startDate) : null
+        const end = doc.endDate ? new Date(doc.endDate) : null
+        if (start && end) {
+          if (now < start) return 'Scheduled'
+          if (now > end) return 'Completed'
+          return 'Active'
+        }
+        return 'Draft'
+      }
+      // Sort key mirrors the values shown in the table (see transformToUITrivia).
+      const sortKeyOf = (doc: TriviaDocument, responses: TriviaResponseDocument[] | null): number | string => {
+        switch (sortBy) {
+          case 'name':
+            return (doc.question || '').toLowerCase()
+          case 'status':
+            return statusOf(doc)
+          case 'skip':
+            return Number(doc.skips || 0)
+          case 'responses':
+            return responses ? responses.length : 0
+          case 'view':
+            return Math.max(Number(doc.views || 0), (responses?.length || 0) + Number(doc.skips || 0))
+          case 'incorrect':
+            return responses ? responses.filter((r) => !isCorrectTriviaResponse(r, doc.correctOptionIndex)).length : 0
+          case 'winners':
+            return responses ? responses.filter((r) => isCorrectTriviaResponse(r, doc.correctOptionIndex)).length : 0
+          case 'date':
+          default:
+            return doc.startDate
+              ? new Date(doc.startDate).getTime()
+              : doc.$createdAt
+              ? new Date(doc.$createdAt).getTime()
+              : 0
+        }
       }
 
-      setTriviaQuizzes(sortedTrivia)
+      let pageDocs: TriviaDocument[]
+      let pageResponses: TriviaResponseDocument[][]
+
+      if (needFullSet) {
+        // Fetch the FULL matched set (searchAll pages through everything, honoring the search term).
+        const searchResult = await triviaService.searchAll(trimmedSearch, [Query.orderDesc('startDate')])
+        const matchedDocs = searchResult.documents as TriviaDocument[]
+
+        // Fetch responses for everyone only when the sort ranks on response-derived counts.
+        const allResponses: (TriviaResponseDocument[] | null)[] = needsResponsesForSort
+          ? await Promise.all(matchedDocs.map((doc) => triviaResponsesService.getByTriviaId(doc.$id).catch(() => [])))
+          : matchedDocs.map(() => null)
+
+        const indexed = matchedDocs.map((doc, i) => ({ doc, responses: allResponses[i] }))
+        indexed.sort((a, b) => {
+          const ka = sortKeyOf(a.doc, a.responses)
+          const kb = sortKeyOf(b.doc, b.responses)
+          if (typeof ka === 'string' || typeof kb === 'string') {
+            return direction * String(ka).localeCompare(String(kb), undefined, { sensitivity: 'base' })
+          }
+          return direction * ((ka as number) - (kb as number))
+        })
+
+        const total = indexed.length
+        const totalPagesCount = Math.ceil(total / pageSize)
+        // Discard if superseded — also stops a stale fetch from recursing on old state below.
+        if (thisFetchId !== fetchIdRef.current) return
+        setTotalTrivia(total)
+        setTotalPages(totalPagesCount)
+        if (totalPagesCount > 0 && page > totalPagesCount) {
+          const lastValidPage = totalPagesCount
+          setCurrentPage(lastValidPage)
+          if (page !== lastValidPage) {
+            return fetchTrivia(lastValidPage, false)
+          }
+        } else if (totalPagesCount === 0) {
+          setCurrentPage(1)
+        }
+
+        const pageSlice = indexed.slice((page - 1) * pageSize, page * pageSize)
+        pageDocs = pageSlice.map((e) => e.doc)
+        // Reuse responses fetched for sorting; otherwise fetch just for the visible page.
+        pageResponses = needsResponsesForSort
+          ? pageSlice.map((e) => e.responses ?? [])
+          : await Promise.all(pageDocs.map((doc) => triviaResponsesService.getByTriviaId(doc.$id).catch(() => [])))
+      } else {
+        // Browse by a server-orderable field: efficient server-side pagination.
+        const orderMethod = sortOrder === 'asc' ? Query.orderAsc : Query.orderDesc
+        const listResult = await triviaService.list([
+          orderMethod(serverOrderField[sortBy]),
+          Query.limit(pageSize),
+          Query.offset((page - 1) * pageSize),
+        ])
+
+        const total = listResult.total
+        const totalPagesCount = Math.ceil(total / pageSize)
+        // Discard if superseded — also stops a stale fetch from recursing on old state below.
+        if (thisFetchId !== fetchIdRef.current) return
+        setTotalTrivia(total)
+        setTotalPages(totalPagesCount)
+        if (totalPagesCount > 0 && page > totalPagesCount) {
+          const lastValidPage = totalPagesCount
+          setCurrentPage(lastValidPage)
+          if (page !== lastValidPage) {
+            return fetchTrivia(lastValidPage, false)
+          }
+        } else if (totalPagesCount === 0) {
+          setCurrentPage(1)
+        }
+
+        pageDocs = listResult.documents as TriviaDocument[]
+        pageResponses = await Promise.all(
+          pageDocs.map((doc) => triviaResponsesService.getByTriviaId(doc.$id).catch(() => []))
+        )
+      }
+
+      // Transform only the current page (winner profiles are fetched here, so keep this bounded).
+      const transformedTrivia = await Promise.all(
+        pageDocs.map((doc, index) => transformToUITrivia(doc, pageResponses[index]))
+      )
+      // Discard this result if a newer fetch has started during the transform (avoids stale overwrite).
+      if (thisFetchId !== fetchIdRef.current) return
+      setTriviaQuizzes(transformedTrivia)
       setCurrentPage(page)
     } catch (err) {
       console.error('Error fetching trivia:', err)
       setError('Failed to load trivia quizzes. Please try again.')
     } finally {
-      if (isInitial) {
-        setIsInitialLoading(false)
-      } else {
-        setIsListLoading(false)
+      // Only the latest fetch clears the loading state.
+      if (thisFetchId === fetchIdRef.current) {
+        if (isInitial) {
+          setIsInitialLoading(false)
+        } else {
+          setIsListLoading(false)
+        }
       }
     }
   }

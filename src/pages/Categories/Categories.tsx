@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { DashboardLayout, ConfirmationModal } from '../../components'
 import {
   CategoriesHeader,
@@ -79,6 +79,9 @@ const Categories = () => {
   const [newThisMonthCount, setNewThisMonthCount] = useState(0)
   const [sortBy, setSortBy] = useState<'createdAt' | 'title'>('createdAt')
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc')
+  // Only the latest fetch may commit — search now pages the full set (multiple round-trips), so a
+  // slower earlier fetch could otherwise resolve after a newer one and overwrite it.
+  const fetchIdRef = useRef(0)
 
   // Count categories created this month directly from the DB so the
   // summary card stays accurate regardless of which page is currently
@@ -99,31 +102,40 @@ const Categories = () => {
 
   // Fetch categories from Appwrite with pagination and sorting
   const fetchCategories = async (page: number = currentPage) => {
+    const thisFetchId = ++fetchIdRef.current
     try {
       setIsLoading(true)
       setError(null)
       
-      // Build pagination and sorting queries
+      // Build sort order (both sort fields are server-orderable)
       const orderMethod = sortOrder === 'asc' ? Query.orderAsc : Query.orderDesc
-      const paginationQueries = [
-        Query.limit(pageSize),
-        Query.offset((page - 1) * pageSize),
-        sortBy === 'title' ? orderMethod('title') : orderMethod('$createdAt'),
-      ]
-      
-      let result
-      if (searchTerm.trim()) {
-        result = await categoriesService.search(searchTerm.trim(), paginationQueries)
+      const orderQuery = sortBy === 'title' ? orderMethod('title') : orderMethod('$createdAt')
+      const trimmedSearch = searchTerm.trim()
+      const isSearching = trimmedSearch.length > 0
+
+      // Searching filters client-side, so it must see the FULL collection (searchAll pages through
+      // everything) — not just the current page, which would hide matches on later pages. Browsing
+      // keeps efficient server-side pagination.
+      let result: { documents: CategoryDocument[]; total: number }
+      if (isSearching) {
+        result = await categoriesService.searchAll(trimmedSearch, [orderQuery])
       } else {
-        result = await categoriesService.list(paginationQueries)
+        result = await categoriesService.list([
+          orderQuery,
+          Query.limit(pageSize),
+          Query.offset((page - 1) * pageSize),
+        ])
       }
-      
+
+      // Discard this result if a newer fetch has started (avoids stale overwrite).
+      if (thisFetchId !== fetchIdRef.current) return
+
       // Extract pagination metadata
       const total = result.total
       const totalPagesCount = Math.ceil(total / pageSize)
       setTotalCategories(total)
       setTotalPages(totalPagesCount)
-      
+
       // Handle edge case: if current page exceeds total pages, reset to last valid page or page 1
       if (totalPagesCount > 0 && page > totalPagesCount) {
         const lastValidPage = totalPagesCount
@@ -134,8 +146,12 @@ const Categories = () => {
       } else if (totalPagesCount === 0) {
         setCurrentPage(1)
       }
-      
-      const transformedCategories = result.documents.map(transformToUICategory)
+
+      // Search returns the full matched set — paginate it client-side; browsing is already one page.
+      const pageDocuments = isSearching
+        ? result.documents.slice((page - 1) * pageSize, page * pageSize)
+        : result.documents
+      const transformedCategories = pageDocuments.map(transformToUICategory)
       setCategories(transformedCategories)
       setCurrentPage(page)
     } catch (err) {
@@ -147,7 +163,9 @@ const Categories = () => {
         message: 'Failed to load categories. Please try again.',
       })
     } finally {
-      setIsLoading(false)
+      if (thisFetchId === fetchIdRef.current) {
+        setIsLoading(false)
+      }
     }
   }
 

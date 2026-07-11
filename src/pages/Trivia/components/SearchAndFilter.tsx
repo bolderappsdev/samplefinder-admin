@@ -1,3 +1,4 @@
+import { useState, useEffect } from 'react'
 import { Icon } from '@iconify/react'
 
 interface SearchAndFilterProps {
@@ -17,6 +18,17 @@ const SearchAndFilter = ({
   sortOrder,
   onSortOrderChange,
 }: SearchAndFilterProps) => {
+  // Debounce the search input: each keystroke now drives a full-collection fetch, so committing on
+  // every character would sweep the whole trivia collection repeatedly. Commit 300ms after typing stops.
+  const [localSearchQuery, setLocalSearchQuery] = useState(searchQuery)
+  useEffect(() => {
+    const timer = setTimeout(() => onSearchChange(localSearchQuery), 300)
+    return () => clearTimeout(timer)
+  }, [localSearchQuery, onSearchChange])
+  // Keep the input in sync when the query is changed/cleared from outside.
+  useEffect(() => {
+    setLocalSearchQuery(searchQuery)
+  }, [searchQuery])
   const getSortDisplayText = () => {
     const sortLabels: Record<string, string> = {
       date: 'Date',
@@ -45,8 +57,8 @@ const SearchAndFilter = ({
           <input
             type="text"
             placeholder="Search by question"
-            value={searchQuery}
-            onChange={(e) => onSearchChange(e.target.value)}
+            value={localSearchQuery}
+            onChange={(e) => setLocalSearchQuery(e.target.value)}
             className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#1D0A74] focus:border-transparent"
           />
         </div>

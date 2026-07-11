@@ -118,19 +118,28 @@ const Users = () => {
         } else {
           queries.push(orderMethod('$createdAt'))
         }
+      } else {
+        // Email/Tier ordering is applied client-side after fetching (email lives in Auth; tier uses
+        // rank order, not lexicographic). Still pin a stable server order so paging the full set
+        // below returns consistent, non-overlapping pages.
+        queries.push(Query.orderDesc('$createdAt'))
       }
-      
+
       const hasSearch = trimmedSearch.length > 0
+      // Search and email/tier sort are resolved client-side below, so they must see EVERY matching
+      // record. A capped fetch here hid matches beyond the cap (e.g. a user older than the newest
+      // 500) — which is why changing a filter/sort, and thus shifting the fetched window, surfaced
+      // results a plain search had missed. Plain browsing keeps efficient server-side pagination.
       const needLargeFetch = isEmailSearch || isPhoneSearch || hasSearch || isEmailSort || isTierSort
+
+      let result: { users: AppUser[]; total: number }
       if (needLargeFetch) {
-        queries.push(Query.limit(500))
-        queries.push(Query.offset(0))
+        result = await appUsersService.listAllWithPagination(queries)
       } else {
         queries.push(Query.limit(pageSize))
         queries.push(Query.offset((page - 1) * pageSize))
+        result = await appUsersService.listWithPagination(queries)
       }
-      
-      const result = await appUsersService.listWithPagination(queries)
 
       // Ignore result if a newer fetch has started (e.g. user cleared search before this completed)
       if (thisFetchId !== fetchIdRef.current) return

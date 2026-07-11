@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useRef } from 'react'
 import { ConfirmationModal, DashboardLayout } from '../../components'
 import { Query } from '../../lib/appwrite'
 import { eventsService, locationsService, type LocationDocument, type LocationFormData } from '../../lib/services'
@@ -80,51 +80,47 @@ const Locations = () => {
   const [searchTerm, setSearchTerm] = useState('')
   const [sortBy, setSortBy] = useState<string>('$createdAt')
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc')
+  // Only the latest fetch may commit — search now pages the full set (multiple round-trips), so a
+  // slower earlier fetch could otherwise resolve after a newer one and overwrite it.
+  const fetchIdRef = useRef(0)
 
   // Fetch locations from Appwrite with pagination, search, and sorting
   const fetchLocations = async (page: number = currentPage) => {
+    const thisFetchId = ++fetchIdRef.current
     try {
       setIsLoading(true)
       setError(null)
       
-      // Build base queries
-      const queries: string[] = []
-      
-      // Apply sorting
+      // Apply sorting (all sort fields are server-orderable)
       const orderMethod = sortOrder === 'asc' ? Query.orderAsc : Query.orderDesc
+      let orderQuery: string
       if (sortBy === 'name') {
-        queries.push(orderMethod('name'))
+        orderQuery = orderMethod('name')
       } else if (sortBy === 'address') {
-        queries.push(orderMethod('address'))
+        orderQuery = orderMethod('address')
       } else if (sortBy === 'city') {
-        queries.push(orderMethod('city'))
+        orderQuery = orderMethod('city')
       } else if (sortBy === 'state') {
-        queries.push(orderMethod('state'))
+        orderQuery = orderMethod('state')
       } else if (sortBy === 'zipCode') {
-        queries.push(orderMethod('zipCode'))
+        orderQuery = orderMethod('zipCode')
       } else {
-        queries.push(orderMethod('$createdAt'))
+        orderQuery = orderMethod('$createdAt')
       }
-      
+
       // Determine if we're searching
       const isSearching = searchTerm.trim().length > 0
-      
-      // When searching, fetch more records for client-side filtering, then paginate results
-      // When not searching, use server-side pagination
-      if (!isSearching) {
-        queries.push(Query.limit(pageSize))
-        queries.push(Query.offset((page - 1) * pageSize))
-      } else {
-        // Fetch up to 500 records for search filtering
-        queries.push(Query.limit(500))
-      }
-      
-      // Fetch locations with filters
-      // Use search service if search term exists (does client-side filtering), otherwise use list service
+
+      // Searching filters client-side, so it must scan the FULL collection (searchAll pages through
+      // everything) — a capped 500-row fetch hid matches beyond it, so an unrelated sort change could
+      // "reveal" more results. Browsing keeps efficient server-side pagination.
       const result = isSearching
-        ? await locationsService.search(searchTerm.trim(), queries)
-        : await locationsService.list(queries)
-      
+        ? await locationsService.searchAll(searchTerm.trim(), [orderQuery])
+        : await locationsService.list([orderQuery, Query.limit(pageSize), Query.offset((page - 1) * pageSize)])
+
+      // Discard this result if a newer fetch has started (avoids stale overwrite).
+      if (thisFetchId !== fetchIdRef.current) return
+
       // Extract pagination metadata
       const total = result.total
       const totalPagesCount = Math.ceil(total / pageSize)
@@ -156,7 +152,9 @@ const Locations = () => {
       console.error('Error fetching locations:', err)
       setError('Failed to load locations. Please try again.')
     } finally {
-      setIsLoading(false)
+      if (thisFetchId === fetchIdRef.current) {
+        setIsLoading(false)
+      }
     }
   }
 
