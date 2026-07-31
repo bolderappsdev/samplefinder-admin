@@ -3,6 +3,7 @@ import type { EventDocument, ClientDocument, AppUser, UserProfile, TriviaDocumen
 import { Query } from './appwrite'
 import {
   aggregatePointsEarnedInRange,
+  breakdownCheckInReviewPoints,
   breakdownTotalPoints,
   emptyPointsBreakdown,
   SIGNUP_BONUS_POINTS,
@@ -13,6 +14,7 @@ import { getAppTimezoneShortLabel } from './dateUtils'
 import jsPDF from 'jspdf'
 import autoTable from 'jspdf-autotable'
 import { getColumnsByKeys, type EntityType } from './reportBuilderConfig'
+import { columnsNotCoveredBy, pickPrimarySource, type PrimarySource } from './reportBuilderSource'
 
 /**
  * Normalize date range for filtering: single date => that full day; range => start through end of end day.
@@ -163,6 +165,19 @@ const pointsEarnedDateRangeColumns: ReportColumn[] = [
   { header: 'Reviews (Range)', key: 'reviews' },
   { header: 'Trivias Won (Range)', key: 'triviasWon' },
 ]
+
+/**
+ * Report Builder headers for the user activity columns when a date range scopes them to the window
+ * instead of the user's lifetime. Keeps a range report from reading as a lifetime total; the column
+ * keys are unchanged, only the labels. Mirrors pointsEarnedDateRangeColumns above.
+ */
+const USER_RANGE_COLUMN_HEADERS: Record<string, string> = {
+  userPoints: 'Points Earned (Range)',
+  checkInReviewPoints: 'Check-in/Review Pts (Range)',
+  checkIns: 'Check-Ins (Range)',
+  reviews: 'Reviews (Range)',
+  triviasWon: 'Trivias Won (Range)',
+}
 
 // Event Recap columns
 const eventRecapColumns: ReportColumn[] = [
@@ -498,27 +513,23 @@ async function fetchCheckInReviewPointsByUser(
   return userTotals
 }
 
-async function fetchAllAppUsers(
-  dateRange?: { start: Date | null; end: Date | null }
-): Promise<AppUser[]> {
+/**
+ * The whole user roster, paginated.
+ *
+ * Deliberately takes no date range: a report's date range scopes each user's *activity*, never
+ * which users appear. Filtering the roster by sign-up date turned "who earned the most points in
+ * July" into "who signed up in July", silently hiding every longer-standing user from the ranking.
+ */
+async function fetchAllAppUsers(): Promise<AppUser[]> {
   const all: AppUser[] = []
   let offset = 0
   let chunk: AppUser[]
   do {
-    const queries: string[] = [
+    chunk = await appUsersService.list([
       Query.orderDesc('$createdAt'),
       Query.limit(REPORT_USERS_PAGE_SIZE),
       Query.offset(offset),
-    ]
-    if (dateRange?.start) {
-      queries.push(Query.greaterThanEqual('$createdAt', dateRange.start.toISOString()))
-    }
-    if (dateRange?.end) {
-      const endDate = new Date(dateRange.end)
-      endDate.setHours(23, 59, 59, 999)
-      queries.push(Query.lessThanEqual('$createdAt', endDate.toISOString()))
-    }
-    chunk = await appUsersService.list(queries)
+    ])
     all.push(...chunk)
     offset += REPORT_USERS_PAGE_SIZE
   } while (chunk.length === REPORT_USERS_PAGE_SIZE)
@@ -1454,101 +1465,84 @@ export const exportService = {
     appTimezone?: string
   ): Promise<{ columns: ReportColumn[]; rows: Record<string, string | number>[] }> {
     const selectedColumns = getColumnsByKeys(selectedColumnKeys)
+
+    // Which joins the event fetcher has to perform for the selected columns.
+    const needsClients = selectedColumns.some(col => col.dataSource.includes('clients'))
+    const needsReviews = selectedColumns.some(col => col.dataSource.includes('reviews'))
+    const needsLocations = selectedColumns.some(col => col.dataSource.includes('locations'))
+
+    // Exactly one fetcher materializes the report — concatenating rows from several produced rows
+    // with mismatched columns (SAM-523). For a named entity that fetcher is the entity itself; for
+    // 'all' pick the one covering the most selected columns. Picking on "any column *mentions*
+    // reviews" instead sent user reports to the per-review fetcher, because the identity columns
+    // (First/Last Name, Username, Email) list both sources: the same user was repeated once per
+    // review and every users-only metric came back blank.
+    const primarySource: PrimarySource | null =
+      entityType === 'all' ? pickPrimarySource(selectedColumns) : entityType
+
+    if (primarySource) {
+      const unfillable = columnsNotCoveredBy(primarySource, selectedColumns)
+      if (unfillable.length > 0) {
+        console.warn(
+          `[report-builder] the "${primarySource}" data source cannot populate these selected columns, so they will be blank: ${unfillable.join(', ')}`
+        )
+      }
+    }
+
+    // A date range over user activity re-scopes the activity columns from lifetime totals to the
+    // window, so relabel their headers — a "User Points" column holding July-only points reads as
+    // a lifetime total. Mirrors the pre-built "Points Earned (Date Range)" report's labels.
+    const scopesUserActivityToRange = primarySource === 'users' && Boolean(dateRange?.start || dateRange?.end)
     const columns: ReportColumn[] = selectedColumns.map(col => ({
-      header: col.header,
+      header: scopesUserActivityToRange ? USER_RANGE_COLUMN_HEADERS[col.key] ?? col.header : col.header,
       key: col.key,
     }))
 
-    // Determine which data sources we need
-    const needsEvents = selectedColumns.some(col => col.dataSource.includes('events'))
-    const needsUsers = selectedColumns.some(col => col.dataSource.includes('users'))
-    const needsClients = selectedColumns.some(col => col.dataSource.includes('clients'))
-    const needsReviews = selectedColumns.some(col => col.dataSource.includes('reviews'))
-    const needsTrivia = selectedColumns.some(col => col.dataSource.includes('trivia'))
-    const needsLocations = selectedColumns.some(col => col.dataSource.includes('locations'))
-
     const rows: Record<string, string | number>[] = []
 
-    // For named entities, route to the matching fetcher.
-    // For 'all', pick a single primary fetcher whose joins can populate every
-    // selected column. Concatenating rows from multiple fetchers (the previous
-    // behavior) produced rows with mismatched columns — see SAM-523.
-    if (entityType === 'all') {
-      // Reviews fetcher already joins user + event (+ client/category for
-      // brand/product), so prefer it whenever review-side columns are needed.
-      if (needsReviews) {
-        const reviewRows = await this.fetchReviewDataForCustomReport(
-          selectedColumnKeys,
-          dateRange,
-          appTimezone
-        )
-        rows.push(...reviewRows)
-      } else if (needsEvents) {
-        const eventRows = await this.fetchEventDataForCustomReport(
+    switch (primarySource) {
+      case 'events':
+        rows.push(...await this.fetchEventDataForCustomReport(
           selectedColumnKeys,
           dateRange,
           appTimezone,
           { needsClients, needsReviews, needsLocations }
-        )
-        rows.push(...eventRows)
-      } else if (needsTrivia) {
-        const triviaRows = await this.fetchTriviaDataForCustomReport(
+        ))
+        break
+      case 'users':
+        rows.push(...await this.fetchUserDataForCustomReport(
           selectedColumnKeys,
           dateRange,
           appTimezone
-        )
-        rows.push(...triviaRows)
-      } else if (needsUsers) {
-        const userRows = await this.fetchUserDataForCustomReport(
+        ))
+        break
+      case 'clients':
+        rows.push(...await this.fetchClientDataForCustomReport(
           selectedColumnKeys,
           dateRange,
           appTimezone
-        )
-        rows.push(...userRows)
-      } else if (needsClients) {
-        const clientRows = await this.fetchClientDataForCustomReport(
+        ))
+        break
+      case 'reviews':
+        rows.push(...await this.fetchReviewDataForCustomReport(
           selectedColumnKeys,
           dateRange,
           appTimezone
-        )
-        rows.push(...clientRows)
-      }
-    } else if (entityType === 'events') {
-      const eventRows = await this.fetchEventDataForCustomReport(
-        selectedColumnKeys,
-        dateRange,
-        appTimezone,
-        { needsClients, needsReviews, needsLocations }
-      )
-      rows.push(...eventRows)
-    } else if (entityType === 'users') {
-      const userRows = await this.fetchUserDataForCustomReport(
-        selectedColumnKeys,
-        dateRange,
-        appTimezone
-      )
-      rows.push(...userRows)
-    } else if (entityType === 'clients') {
-      const clientRows = await this.fetchClientDataForCustomReport(
-        selectedColumnKeys,
-        dateRange,
-        appTimezone
-      )
-      rows.push(...clientRows)
-    } else if (entityType === 'reviews') {
-      const reviewRows = await this.fetchReviewDataForCustomReport(
-        selectedColumnKeys,
-        dateRange,
-        appTimezone
-      )
-      rows.push(...reviewRows)
-    } else if (entityType === 'trivia') {
-      const triviaRows = await this.fetchTriviaDataForCustomReport(
-        selectedColumnKeys,
-        dateRange,
-        appTimezone
-      )
-      rows.push(...triviaRows)
+        ))
+        break
+      case 'trivia':
+        rows.push(...await this.fetchTriviaDataForCustomReport(
+          selectedColumnKeys,
+          dateRange,
+          appTimezone
+        ))
+        break
+    }
+
+    // "Who earned the most points in the window" is the question a date-range points report is
+    // asked, so rank by it — matching the pre-built date-range report.
+    if (scopesUserActivityToRange && selectedColumnKeys.includes('userPoints')) {
+      sortPointsRowsByUserPointsDesc(rows)
     }
 
     return { columns, rows }
@@ -1702,20 +1696,41 @@ export const exportService = {
     return rows
   },
 
-  // Helper method for fetching user data for custom reports
+  /**
+   * Users for a custom report — one row per user.
+   *
+   * A selected date range scopes the user's ACTIVITY, not the roster: every user is listed, and the
+   * activity columns (User Points, Check-in/Review Pts, Check-Ins, Reviews, Trivias Won) report
+   * only what was earned inside the window, via the same aggregation as the pre-built
+   * "Points Earned (Date Range)" report. Previously the range filtered the roster by sign-up date
+   * while the columns stayed lifetime totals, so "who earned the most points in July" was answered
+   * with "the users who signed up in July, ranked by their all-time points" — wrong on both axes.
+   *
+   * With no date range every column keeps its lifetime meaning (user_profiles totals + all-time
+   * aggregations).
+   */
   async fetchUserDataForCustomReport(
     columnKeys: string[],
     dateRange?: { start: Date | null; end: Date | null },
     appTimezone?: string
   ): Promise<Record<string, string | number>[]> {
-    const users = await fetchAllAppUsers(dateRange)
+    const scopeActivityToRange = Boolean(dateRange?.start || dateRange?.end)
+    const users = await fetchAllAppUsers()
     const referralsCountByCode = buildReferralsCountByCode(users)
-    const checkInReviewPointsByUser = await fetchCheckInReviewPointsByUser()
-    const triviasWonByUser = await fetchTriviasWonCountByUser()
+    // In-range activity and the all-time maps are mutually exclusive — only fetch what's used.
+    const earnedInRangeByUser = scopeActivityToRange
+      ? await fetchPointsEarnedInRangeByUser(dateRange)
+      : null
+    const checkInReviewPointsByUser = scopeActivityToRange ? null : await fetchCheckInReviewPointsByUser()
+    const triviasWonByUser = scopeActivityToRange ? null : await fetchTriviasWonCountByUser()
 
     return users.map(user => {
       const userRecord = user as Record<string, unknown>
       const userId = (user as { $id?: string }).$id
+      // Non-null only for a range report; users with no in-range activity score zero, not absent.
+      const inRange = earnedInRangeByUser
+        ? (userId ? earnedInRangeByUser.get(userId) : undefined) ?? emptyPointsBreakdown()
+        : null
       const row: Record<string, string | number> = {}
 
       columnKeys.forEach(key => {
@@ -1752,10 +1767,14 @@ export const exportService = {
             row[key] = code ? (referralsCountByCode.get(code) ?? 0) : 0
             break
           case 'userPoints':
-            row[key] = (userRecord.totalPoints as number) ?? 0
+            row[key] = inRange
+              ? breakdownTotalPoints(inRange)
+              : (userRecord.totalPoints as number) ?? 0
             break
           case 'checkInReviewPoints':
-            row[key] = userId ? (checkInReviewPointsByUser.get(userId) ?? 0) : 0
+            row[key] = inRange
+              ? breakdownCheckInReviewPoints(inRange)
+              : userId ? (checkInReviewPointsByUser?.get(userId) ?? 0) : 0
             break
           case 'baBadge':
             row[key] = (userRecord.isAmbassador as boolean) ? 'Yes' : 'No'
@@ -1767,13 +1786,15 @@ export const exportService = {
             row[key] = (userRecord.tierLevel as string) || 'NewbieSampler'
             break
           case 'checkIns':
-            row[key] = (userRecord.totalEvents as number) ?? 0
+            row[key] = inRange ? inRange.checkInCount : (userRecord.totalEvents as number) ?? 0
             break
           case 'reviews':
-            row[key] = (userRecord.totalReviews as number) ?? 0
+            row[key] = inRange ? inRange.reviewCount : (userRecord.totalReviews as number) ?? 0
             break
           case 'triviasWon':
-            row[key] = userId ? (triviasWonByUser.get(userId) ?? 0) : 0
+            row[key] = inRange
+              ? inRange.triviaWins
+              : userId ? (triviasWonByUser?.get(userId) ?? 0) : 0
             break
         }
       })

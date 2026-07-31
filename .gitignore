@@ -32,3 +32,6 @@ dist-ssr
 
 # transient tsc output for scripts/verify-points-earned.mjs
 scripts/.ptcheck/
+
+# transient tsc output for scripts/verify-report-builder-source.mjs
+scripts/.rbcheck/
