@@ -10,7 +10,8 @@
     "build:staging": "tsc -b && vite build --mode staging",
     "lint": "eslint .",
     "preview": "vite preview",
-    "backfill:event-location-ids": "node scripts/backfill-event-location-ids.mjs"
+    "backfill:event-location-ids": "node scripts/backfill-event-location-ids.mjs",
+    "verify:report-builder": "tsc src/lib/reportBuilderSource.ts src/lib/reportBuilderConfig.ts --outDir scripts/.rbcheck --target es2020 --module es2020 --moduleResolution bundler --skipLibCheck --jsx react-jsx && node scripts/verify-report-builder-source.mjs"
   },
   "dependencies": {
     "@iconify/react": "^6.0.2",
