@@ -60,7 +60,16 @@ export const REPORT_COLUMNS: ColumnDefinition[] = [
   { key: 'checkIns', header: 'Check-Ins', category: 'Users', dataSource: ['users'], format: 'number' },
   { key: 'reviews', header: 'Reviews', category: 'Users', dataSource: ['users'], format: 'number' },
   { key: 'triviasWon', header: 'Trivias Won', category: 'Users', dataSource: ['users'], format: 'number' },
-  
+  // Referral bonuses have two sides. 'referralsCount'/'User Points' above never showed the inviter's
+  // half, so someone whose points came mostly from referring others read as having earned nothing.
+  // These two are range-scoped when a date range is set (see USER_RANGE_COLUMN_HEADERS).
+  { key: 'referrerPoints', header: 'Referral Pts — Invited', category: 'Users', dataSource: ['users'], format: 'number' },
+  { key: 'referralsMade', header: 'Referrals Made', category: 'Users', dataSource: ['users'], format: 'number' },
+  // Always lifetime, even on a range report — pair them with User Points to see, per user, how much
+  // of a lifetime total the selected window explains and how much has no datable source at all.
+  { key: 'lifetimePoints', header: 'Lifetime Points', category: 'Users', dataSource: ['users'], format: 'number' },
+  { key: 'unattributedPoints', header: 'Unattributed Points', category: 'Users', dataSource: ['users'], format: 'number' },
+
   // Review columns
   { key: 'checkIn', header: 'Check-In (Yes/No)', category: 'Reviews', dataSource: ['reviews'], format: 'boolean' },
   { key: 'hasReview', header: 'Review (Yes/No)', category: 'Reviews', dataSource: ['reviews'], format: 'boolean' },

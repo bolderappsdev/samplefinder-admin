@@ -143,5 +143,40 @@ for (const [source, method] of Object.entries(fetcherMethods)) {
   eq(`${method} handles every column it advertises`, advertised.filter((k) => !handled.has(k)), [])
 }
 
+/**
+ * Static guard #2: the preview's descending-sort key set and the export's must agree. They are two
+ * literals in two files, so drift is silent — and it shows up as an exported CSV ordered opposite to
+ * the preview the user just approved (worst first instead of the winner first).
+ */
+const previewSrc = readFileSync(join(repoRoot, 'src/pages/Reports/PreviewReports.tsx'), 'utf8')
+const keysFromSetLiteral = (src, declaration) => {
+  const start = src.indexOf(declaration)
+  if (start < 0) return null
+  const open = src.indexOf('[', start)
+  const close = src.indexOf(']', open)
+  if (open < 0 || close < 0) return null
+  return new Set([...src.slice(open, close).matchAll(/'([a-zA-Z0-9_]+)'/g)].map((m) => m[1]))
+}
+const previewDesc = keysFromSetLiteral(previewSrc, 'const descendingNumericKeys = new Set(')
+const exportDesc = keysFromSetLiteral(exportServiceSrc, 'const SORT_DESCENDING_NUMERIC_KEYS = new Set(')
+if (!previewDesc || !exportDesc) {
+  failures++
+  console.error('FAIL could not locate both descending-sort key sets (declaration renamed?)')
+} else {
+  eq('descending-sort keys: in preview but not in export',
+    [...previewDesc].filter((k) => !exportDesc.has(k)), [])
+  eq('descending-sort keys: in export but not in preview',
+    [...exportDesc].filter((k) => !previewDesc.has(k)), [])
+  // Every numeric points/count column the Points Earned (Date Range) report emits must sort
+  // descending — the winner-first ordering is the whole point of that report.
+  const rangeNumericKeys = [
+    'userPoints', 'checkInPoints', 'reviewPoints', 'triviaPoints', 'signupPoints',
+    'referralPoints', 'referrerPoints', 'checkIns', 'reviews', 'triviasWon',
+    'referralsMade', 'lifetimePoints', 'unattributedPoints',
+  ]
+  eq('every Points Earned (Date Range) numeric column sorts descending',
+    rangeNumericKeys.filter((k) => !previewDesc.has(k) || !exportDesc.has(k)), [])
+}
+
 console.log(failures === 0 ? '\nAll checks passed.' : `\n${failures} check(s) failed.`)
 process.exit(failures === 0 ? 0 : 1)
