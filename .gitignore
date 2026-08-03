@@ -38,3 +38,6 @@ scripts/.rbcheck/
 
 # transient tsc output for scripts/verify-user-search.mjs
 scripts/.uscheck/
+
+# transient tsc output for scripts/verify-user-list-view.mjs
+scripts/.ulvcheck/

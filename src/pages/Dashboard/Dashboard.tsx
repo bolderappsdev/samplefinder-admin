@@ -138,6 +138,19 @@ const Dashboard = () => {
   // (multiple round-trips), so a slower earlier fetch can resolve after a newer one. Only the latest
   // fetch is allowed to commit its results. Mirrors the same guard in Users.tsx.
   const fetchIdRef = useRef(0)
+  /**
+   * Full-collection reads, keyed by the server-side query signature.
+   *
+   * Searching and the Active/Inactive filter are resolved client-side, so they need every matching
+   * event rather than one page. The search term is NOT part of the server query, so consecutive
+   * keystrokes produce the same signature — and this effect list has no debounce, so typing
+   * "coffee" used to re-read all ~719 events six times over. Caching on the signature collapses
+   * that to one read; changing a real server-side filter (status, date range, sort) misses the
+   * cache and re-reads, which is correct.
+   */
+  const allEventsCacheRef = useRef<{ key: string; documents: EventDocument[] } | null>(null)
+  /** Brand names for the events list. Only ~33 clients exist, so hold them for the session. */
+  const clientsCacheRef = useRef<Map<string, ClientDocument> | null>(null)
 
   // Helper functions for formatting
   const formatNumber = (num: number): string => {
@@ -242,11 +255,17 @@ const Dashboard = () => {
     }
   }
 
-  // Fetch events from database with pagination, search, filter, and sort
-  const fetchEvents = async (page: number = currentPage) => {
+  // Fetch events from database with pagination, search, filter, and sort.
+  // `force` drops the cached full-collection read — pass it after any create/update/delete so the
+  // list can't serve a stale document set.
+  const fetchEvents = async (page: number = currentPage, force = false) => {
     const thisFetchId = ++fetchIdRef.current
     try {
-      setIsLoading(true)
+      if (force) {
+        allEventsCacheRef.current = null
+        // Also re-read brands: an event may have been pointed at a different client.
+        clientsCacheRef.current = null
+      }
 
       // Build base queries
       const queries: string[] = []
@@ -310,19 +329,35 @@ const Dashboard = () => {
       // fetched window (e.g. an active event whose future start time sorts it last) stays invisible
       // until an unrelated filter or date range shifts the window. Plain browsing keeps efficient
       // server-side pagination.
+      // Reuse the last full read when only the (client-side) search term changed.
+      const cacheKey = JSON.stringify(queries)
+      const cachedEvents = allEventsCacheRef.current
+      const servedFromCache =
+        (isSearching || needsClientSideStatusFilter) && cachedEvents?.key === cacheKey
+      // Spin only when this call actually waits on the network. EventsTable renders a loading state,
+      // so flipping this for an in-memory recompute would flicker the table on every keystroke.
+      if (!servedFromCache) {
+        setIsLoading(true)
+      }
+
       let result: { documents: EventDocument[]; total: number }
       if (!isSearching && !needsClientSideStatusFilter) {
         const pagedQueries = [...queries, Query.limit(pageSize), Query.offset((page - 1) * pageSize)]
         result = await eventsService.list(pagedQueries)
       } else {
-        const allDocuments = await fetchAllPages<EventDocument>((cursor, limit) =>
-          eventsService.list([
-            ...queries,
-            Query.limit(limit),
-            ...(cursor ? [Query.cursorAfter(cursor)] : []),
-          ])
-        )
-        result = { documents: allDocuments, total: allDocuments.length }
+        if (servedFromCache && cachedEvents) {
+          result = { documents: cachedEvents.documents, total: cachedEvents.documents.length }
+        } else {
+          const allDocuments = await fetchAllPages<EventDocument>((cursor, limit) =>
+            eventsService.list([
+              ...queries,
+              Query.limit(limit),
+              ...(cursor ? [Query.cursorAfter(cursor)] : []),
+            ])
+          )
+          allEventsCacheRef.current = { key: cacheKey, documents: allDocuments }
+          result = { documents: allDocuments, total: allDocuments.length }
+        }
       }
 
       // A newer fetch superseded this one while it was in flight — discard it before doing the
@@ -330,8 +365,10 @@ const Dashboard = () => {
       if (thisFetchId !== fetchIdRef.current) return
 
       // Auto-transition expired hidden events to inactive by clearing hidden flag in DB.
+      // Skipped when the documents came from the cache: they were already reconciled on the read
+      // that populated it, and re-running this would re-issue PATCHes on every keystroke.
       const now = new Date()
-      const hiddenExpiredEvents = result.documents.filter((doc) => {
+      const hiddenExpiredEvents = servedFromCache ? [] : result.documents.filter((doc) => {
         if (!doc.isHidden) return false
         const eventEnd = doc.endTime ? new Date(doc.endTime) : null
         return !!eventEnd && !isNaN(eventEnd.getTime()) && now > eventEnd
@@ -349,15 +386,23 @@ const Dashboard = () => {
         })
       }
 
-      // Collect client IDs from all fetched documents (needed for both search and non-search to resolve brand names)
+      // Resolve brand names. The whole clients table is ~33 rows, so read it once and keep it for
+      // the session instead of resolving IDs on every list render.
       const clientIds = [...new Set(
         result.documents
           .map(doc => doc.client as string | undefined)
           .filter((id): id is string => !!id)
       )]
-      const clientsMap = clientIds.length > 0
-        ? await clientsService.getByIds(clientIds)
-        : new Map<string, ClientDocument>()
+      let clientsMap = clientsCacheRef.current ?? new Map<string, ClientDocument>()
+      const hasEveryClient = clientIds.every((id) => clientsMap.has(id))
+      if (clientIds.length > 0 && !hasEveryClient) {
+        clientsMap = await clientsService.getByIds(clientIds)
+        // Merge rather than replace, so a later page's brands don't evict this page's.
+        const merged = new Map(clientsCacheRef.current ?? [])
+        for (const [id, client] of clientsMap) merged.set(id, client)
+        clientsCacheRef.current = merged
+        clientsMap = merged
+      }
 
       // Map all documents to events with brand names resolved
       let mappedEvents = result.documents.map((doc) => {
@@ -1049,7 +1094,7 @@ const Dashboard = () => {
 
       // Refresh events list - reset to page 1 after CSV upload
       setCurrentPage(1)
-      await fetchEvents(1)
+      await fetchEvents(1, true)
     } catch (err) {
       const errorMessage = extractErrorMessage(err)
       addNotification({
@@ -1183,7 +1228,7 @@ const Dashboard = () => {
 
       // 8. Refresh events list - reset to page 1 after creating new event
       setCurrentPage(1)
-      await fetchEvents(1)
+      await fetchEvents(1, true)
 
       // 9. Close modal on success (modal will close automatically via onClose in AddEventModal)
     } catch (err) {
@@ -1351,7 +1396,7 @@ const Dashboard = () => {
       })
 
       // 8. Refresh events list
-      await fetchEvents(currentPage)
+      await fetchEvents(currentPage, true)
 
       // 9. Close modal on success
       setIsEditModalOpen(false)
@@ -1647,7 +1692,7 @@ const Dashboard = () => {
                     message: `Event "${event.venueName}" has been ${isCurrentlyHidden ? 'unhidden' : 'hidden'} successfully.`,
                   })
                   setConfirmationModal({ ...confirmationModal, isOpen: false })
-                  await fetchEvents(currentPage)
+                  await fetchEvents(currentPage, true)
                 } catch (err) {
                   const errorMessage = extractErrorMessage(err)
                   addNotification({
@@ -1679,7 +1724,7 @@ const Dashboard = () => {
                     message: `Event "${event.venueName}" has been deleted successfully.`,
                   })
                   setConfirmationModal({ ...confirmationModal, isOpen: false })
-                  await fetchEvents(currentPage)
+                  await fetchEvents(currentPage, true)
                 } catch (err) {
                   const errorMessage = extractErrorMessage(err)
                   addNotification({
@@ -1758,7 +1803,7 @@ const Dashboard = () => {
                 setSelectedEvent(null)
                 setSelectedEventDoc(null)
                 setEditModalInitialData(null)
-                await fetchEvents(currentPage)
+                await fetchEvents(currentPage, true)
               } catch (err) {
                 const errorMessage = extractErrorMessage(err)
                 addNotification({
@@ -1795,7 +1840,7 @@ const Dashboard = () => {
                 setSelectedEvent(null)
                 setSelectedEventDoc(null)
                 setEditModalInitialData(null)
-                await fetchEvents(currentPage)
+                await fetchEvents(currentPage, true)
               } catch (err) {
                 const errorMessage = extractErrorMessage(err)
                 addNotification({
@@ -1832,7 +1877,7 @@ const Dashboard = () => {
                 setSelectedEvent(null)
                 setSelectedEventDoc(null)
                 setEditModalInitialData(null)
-                await fetchEvents(currentPage)
+                await fetchEvents(currentPage, true)
               } catch (err) {
                 const errorMessage = extractErrorMessage(err)
                 addNotification({
@@ -1869,7 +1914,7 @@ const Dashboard = () => {
                 setSelectedEvent(null)
                 setSelectedEventDoc(null)
                 setEditModalInitialData(null)
-                await fetchEvents(currentPage)
+                await fetchEvents(currentPage, true)
               } catch (err) {
                 const errorMessage = extractErrorMessage(err)
                 addNotification({
@@ -1906,7 +1951,7 @@ const Dashboard = () => {
                 setSelectedEvent(null)
                 setSelectedEventDoc(null)
                 setEditModalInitialData(null)
-                await fetchEvents(currentPage)
+                await fetchEvents(currentPage, true)
               } catch (err) {
                 const errorMessage = extractErrorMessage(err)
                 addNotification({

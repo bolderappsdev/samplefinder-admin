@@ -449,7 +449,99 @@
                     "default": null
                 }
             ],
-            "indexes": []
+            "indexes": [
+                {
+                    "$id": "authID",
+                    "key": "authID",
+                    "type": "key",
+                    "status": "available",
+                    "error": "",
+                    "attributes": [
+                        "authID"
+                    ],
+                    "orders": [
+                        "ASC"
+                    ]
+                },
+                {
+                    "$id": "username",
+                    "key": "username",
+                    "type": "key",
+                    "status": "available",
+                    "error": "",
+                    "attributes": [
+                        "username"
+                    ],
+                    "orders": [
+                        "ASC"
+                    ]
+                },
+                {
+                    "$id": "phoneNumber",
+                    "key": "phoneNumber",
+                    "type": "key",
+                    "status": "available",
+                    "error": "",
+                    "attributes": [
+                        "phoneNumber"
+                    ],
+                    "orders": [
+                        "ASC"
+                    ]
+                },
+                {
+                    "$id": "referralCode",
+                    "key": "referralCode",
+                    "type": "key",
+                    "status": "available",
+                    "error": "",
+                    "attributes": [
+                        "referralCode"
+                    ],
+                    "orders": [
+                        "ASC"
+                    ]
+                },
+                {
+                    "$id": "usedReferralCode",
+                    "key": "usedReferralCode",
+                    "type": "key",
+                    "status": "available",
+                    "error": "",
+                    "attributes": [
+                        "usedReferralCode"
+                    ],
+                    "orders": [
+                        "ASC"
+                    ]
+                },
+                {
+                    "$id": "tierLevel",
+                    "key": "tierLevel",
+                    "type": "key",
+                    "status": "available",
+                    "error": "",
+                    "attributes": [
+                        "tierLevel"
+                    ],
+                    "orders": [
+                        "ASC"
+                    ]
+                },
+                {
+                    "$id": "isBlocked",
+                    "key": "isBlocked",
+                    "type": "key",
+                    "status": "available",
+                    "error": "",
+                    "attributes": [
+                        "isBlocked"
+                    ],
+                    "orders": [
+                        "ASC"
+                    ]
+                }
+            ]
         },
         {
             "$id": "clients",
@@ -500,7 +592,21 @@
                     "encrypt": false
                 }
             ],
-            "indexes": []
+            "indexes": [
+                {
+                    "$id": "name",
+                    "key": "name",
+                    "type": "key",
+                    "status": "available",
+                    "error": "",
+                    "attributes": [
+                        "name"
+                    ],
+                    "orders": [
+                        "ASC"
+                    ]
+                }
+            ]
         },
         {
             "$id": "categories",
@@ -786,7 +892,62 @@
                     "side": "parent"
                 }
             ],
-            "indexes": []
+            "indexes": [
+                {
+                    "$id": "isArchived_isHidden",
+                    "key": "isArchived_isHidden",
+                    "type": "key",
+                    "status": "available",
+                    "error": "",
+                    "attributes": [
+                        "isArchived",
+                        "isHidden"
+                    ],
+                    "orders": [
+                        "ASC",
+                        "ASC"
+                    ]
+                },
+                {
+                    "$id": "date",
+                    "key": "date",
+                    "type": "key",
+                    "status": "available",
+                    "error": "",
+                    "attributes": [
+                        "date"
+                    ],
+                    "orders": [
+                        "ASC"
+                    ]
+                },
+                {
+                    "$id": "startTime",
+                    "key": "startTime",
+                    "type": "key",
+                    "status": "available",
+                    "error": "",
+                    "attributes": [
+                        "startTime"
+                    ],
+                    "orders": [
+                        "ASC"
+                    ]
+                },
+                {
+                    "$id": "checkInCode",
+                    "key": "checkInCode",
+                    "type": "key",
+                    "status": "available",
+                    "error": "",
+                    "attributes": [
+                        "checkInCode"
+                    ],
+                    "orders": [
+                        "ASC"
+                    ]
+                }
+            ]
         },
         {
             "$id": "notifications",
@@ -950,7 +1111,23 @@
                     "default": null
                 }
             ],
-            "indexes": []
+            "indexes": [
+                {
+                    "$id": "status_scheduledAt",
+                    "key": "status_scheduledAt",
+                    "type": "key",
+                    "status": "available",
+                    "error": "",
+                    "attributes": [
+                        "status",
+                        "scheduledAt"
+                    ],
+                    "orders": [
+                        "ASC",
+                        "ASC"
+                    ]
+                }
+            ]
         },
         {
             "$id": "trivia",
@@ -1057,7 +1234,34 @@
                     "encrypt": false
                 }
             ],
-            "indexes": []
+            "indexes": [
+                {
+                    "$id": "startDate",
+                    "key": "startDate",
+                    "type": "key",
+                    "status": "available",
+                    "error": "",
+                    "attributes": [
+                        "startDate"
+                    ],
+                    "orders": [
+                        "ASC"
+                    ]
+                },
+                {
+                    "$id": "endDate",
+                    "key": "endDate",
+                    "type": "key",
+                    "status": "available",
+                    "error": "",
+                    "attributes": [
+                        "endDate"
+                    ],
+                    "orders": [
+                        "ASC"
+                    ]
+                }
+            ]
         },
         {
             "$id": "trivia_responses",
@@ -1255,7 +1459,21 @@
                     "encrypt": false
                 }
             ],
-            "indexes": []
+            "indexes": [
+                {
+                    "$id": "key_lookup",
+                    "key": "key_lookup",
+                    "type": "key",
+                    "status": "available",
+                    "error": "",
+                    "attributes": [
+                        "key"
+                    ],
+                    "orders": [
+                        "ASC"
+                    ]
+                }
+            ]
         },
         {
             "$id": "tiers",
@@ -1315,7 +1533,21 @@
                     "default": null
                 }
             ],
-            "indexes": []
+            "indexes": [
+                {
+                    "$id": "order",
+                    "key": "order",
+                    "type": "key",
+                    "status": "available",
+                    "error": "",
+                    "attributes": [
+                        "order"
+                    ],
+                    "orders": [
+                        "ASC"
+                    ]
+                }
+            ]
         },
         {
             "$id": "locations",
@@ -1383,7 +1615,21 @@
                     "default": "-"
                 }
             ],
-            "indexes": []
+            "indexes": [
+                {
+                    "$id": "name",
+                    "key": "name",
+                    "type": "key",
+                    "status": "available",
+                    "error": "",
+                    "attributes": [
+                        "name"
+                    ],
+                    "orders": [
+                        "ASC"
+                    ]
+                }
+            ]
         },
         {
             "$id": "checkins",

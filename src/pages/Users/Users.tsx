@@ -26,10 +26,21 @@ import {
   type TierDocument,
   tierLevelForTotalPoints,
   effectiveTierLevel,
+  USER_PROFILE_LIST_FIELDS,
 } from '../../lib/services'
 import { Query, storage, appwriteConfig, ID } from '../../lib/appwrite'
 import { storedDobToDateInputValue } from '../../lib/formUtils'
-import { matchesAllTokens } from '../../lib/userSearch'
+import { buildUserListView, ALL_TIERS } from '../../lib/userListView'
+
+/**
+ * How long the cached user set is served before the next interaction re-reads it.
+ *
+ * Bounds staleness: mutations made in this tab force a refresh explicitly, but a profile created by
+ * another admin — or a new mobile signup — is only visible after a fresh read. Before this page
+ * cached anything, every search refetched, so freshness was implicit; this keeps that property
+ * within a minute while leaving a burst of typing entirely in memory.
+ */
+const USERS_CACHE_TTL_MS = 60_000
 
 // Build a human-readable label for confirmation modals (e.g. "user
 // John Smith", "user @jsmith", "user jsmith@example.com"). Returns
@@ -45,7 +56,7 @@ const Users = () => {
   const [searchParams, setSearchParams] = useSearchParams()
   const { addNotification } = useNotificationStore()
   const [searchQuery, setSearchQuery] = useState('')
-  const [tierFilter, setTierFilter] = useState('All Tiers')
+  const [tierFilter, setTierFilter] = useState(ALL_TIERS)
   const [sortBy, setSortBy] = useState<'createdAt' | 'name' | 'points' | 'events' | 'reviews' | 'email' | 'tierLevel' | 'dob'>('createdAt')
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc')
   const [isInitialLoad, setIsInitialLoad] = useState(true)
@@ -72,185 +83,120 @@ const Users = () => {
   const [isLoading, setIsLoading] = useState(false)
   const [tierOrderMap, setTierOrderMap] = useState<Record<string, number>>({})
   const [filterTierList, setFilterTierList] = useState<TierDocument[]>([])
-  const searchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const fetchIdRef = useRef(0)
+  // The whole user set. Search / tier filter / sort / paging are resolved from this in memory, so
+  // none of them costs a request. See loadAllUsers below for why.
+  const allUsersRef = useRef<{ users: AppUser[]; at: number } | null>(null)
+  const inFlightLoadRef = useRef<Promise<AppUser[]> | null>(null)
+  /**
+   * Tier metadata, mirrored into a ref so fetchUsers reads the latest values rather than whatever
+   * its closure captured.
+   *
+   * Tiers load on their own request, in parallel with the user load and much faster than it. Reading
+   * the state variable meant the first render usually resolved tiers as "not loaded yet" and showed
+   * each user's STORED tier instead of the effective one, with no recompute afterwards because the
+   * recompute effect is gated on isInitialLoad.
+   */
+  const tierDataRef = useRef<{ tiers: TierDocument[]; orderMap: Record<string, number> }>({
+    tiers: [],
+    orderMap: {},
+  })
 
-  // Fetch users from Appwrite with pagination and search
-  const fetchUsers = async (page: number = currentPage) => {
+  /**
+   * Load every user profile (plus its Auth email) once, then serve all interactions from memory.
+   *
+   * Search and the email/tier sorts have always been resolved client-side — email lives in Auth, not
+   * user_profiles, and tier sorts by rank rather than alphabetically — so they already required the
+   * FULL set, not a page of it. The page used to re-fetch that whole set on every debounced
+   * keystroke, and re-resolve an Auth email for every profile each time. Measured against
+   * production that was ~20s per search and up to ~77s while refining one.
+   *
+   * Loading once and filtering locally makes every one of those interactions instant, and removes
+   * the class of bug where a match outside the fetched window was invisible. Concurrent callers
+   * share one in-flight request so clearing a search can't start a second full load.
+   */
+  const loadAllUsers = async (force = false): Promise<AppUser[]> => {
+    const cached = allUsersRef.current
+    const isFresh = !!cached && Date.now() - cached.at < USERS_CACHE_TTL_MS
+    if (!force && cached && isFresh) return cached.users
+    if (!force && inFlightLoadRef.current) return inFlightLoadRef.current
+
+    const load = appUsersService
+      .listAllWithPagination([
+        // Ship only the columns the list renders — the omitted `notifications` array is ~97% of a
+        // profile's bytes. The Edit modal re-reads the full document separately.
+        Query.select([...USER_PROFILE_LIST_FIELDS]),
+        Query.orderDesc('$createdAt'),
+      ])
+      .then((result) => {
+        allUsersRef.current = { users: result.users, at: Date.now() }
+        return result.users
+      })
+      .catch((err) => {
+        // Serve the stale set rather than emptying the table if a refresh fails.
+        if (cached) return cached.users
+        throw err
+      })
+      .finally(() => {
+        inFlightLoadRef.current = null
+      })
+
+    inFlightLoadRef.current = load
+    return load
+  }
+
+  // Resolve the list for the requested page. Only hits the network when the cache is cold, or when
+  // a caller passes force=true after a mutation that changed a profile server-side.
+  const fetchUsers = async (page: number = currentPage, force = false) => {
     const thisFetchId = ++fetchIdRef.current
 
     try {
-      setIsLoading(true)
+      // Spin only when this actually waits on the network — showing the spinner for an in-memory
+      // recompute makes the table flicker on every keystroke. Must mirror loadAllUsers' own
+      // freshness test, otherwise an expired cache reloads with no loading state at all.
+      const cached = allUsersRef.current
+      const needsNetwork = force || !cached || Date.now() - cached.at >= USERS_CACHE_TTL_MS
+      if (needsNetwork) {
+        setIsLoading(true)
+      }
       setError(null)
 
-      // Build queries
-      const queries: string[] = []
-      const trimmedSearch = searchQuery.trim()
-      
-      // Check if searching by email (contains @) or phone number (all digits)
-      const isEmailSearch = trimmedSearch.length > 0 && trimmedSearch.includes('@')
-      const digitsOnly = trimmedSearch.replace(/\D/g, '')
-      const isPhoneSearch = trimmedSearch.length > 0 && digitsOnly && digitsOnly === trimmedSearch && digitsOnly.length >= 3
-      
-      // Note: email lives in the Auth system, not user_profiles, so ALL searches
-      // (including partial-email input without '@') must fetch a larger set and
-      // filter client-side to match against email as well as name/username.
-      
-      // Apply tier filter by canonical tierLevel field
-      if (tierFilter !== 'All Tiers') {
-        queries.push(Query.equal('tierLevel', [tierFilter]))
-      }
-      
-      // Email sort requires client-side (email may come from Auth); fetch more then sort
-      const isEmailSort = sortBy === 'email'
-      const isTierSort = sortBy === 'tierLevel'
-      if (!isEmailSort && !isTierSort) {
-        const orderMethod = sortOrder === 'asc' ? Query.orderAsc : Query.orderDesc
-        if (sortBy === 'points') {
-          queries.push(orderMethod('totalPoints'))
-        } else if (sortBy === 'name') {
-          queries.push(orderMethod('firstname'))
-        } else if (sortBy === 'events') {
-          queries.push(orderMethod('totalEvents'))
-        } else if (sortBy === 'reviews') {
-          queries.push(orderMethod('totalReviews'))
-        } else if (sortBy === 'dob') {
-          queries.push(orderMethod('dob'))
-        } else {
-          queries.push(orderMethod('$createdAt'))
-        }
-      } else {
-        // Email/Tier ordering is applied client-side after fetching (email lives in Auth; tier uses
-        // rank order, not lexicographic). Still pin a stable server order so paging the full set
-        // below returns consistent, non-overlapping pages.
-        queries.push(Query.orderDesc('$createdAt'))
-      }
+      const allUsers = await loadAllUsers(force)
 
-      const hasSearch = trimmedSearch.length > 0
-      // Search and email/tier sort are resolved client-side below, so they must see EVERY matching
-      // record. A capped fetch here hid matches beyond the cap (e.g. a user older than the newest
-      // 500) — which is why changing a filter/sort, and thus shifting the fetched window, surfaced
-      // results a plain search had missed. Plain browsing keeps efficient server-side pagination.
-      const needLargeFetch = isEmailSearch || isPhoneSearch || hasSearch || isEmailSort || isTierSort
-
-      let result: { users: AppUser[]; total: number }
-      if (needLargeFetch) {
-        result = await appUsersService.listAllWithPagination(queries)
-      } else {
-        queries.push(Query.limit(pageSize))
-        queries.push(Query.offset((page - 1) * pageSize))
-        result = await appUsersService.listWithPagination(queries)
-      }
-
-      // Ignore result if a newer fetch has started (e.g. user cleared search before this completed)
+      // A newer interaction superseded this one while the load was in flight.
       if (thisFetchId !== fetchIdRef.current) return
 
-      // Substitute the stored tierLevel with the effective tier (max of stored vs
-      // points-derived) so the table displays the same tier the mobile app shows on
-      // Achievements/Profile. Falls back to stored value when tier metadata isn't loaded.
-      const usersWithEffectiveTier = filterTierList.length > 0
-        ? result.users.map((u) => ({
-            ...u,
-            tierLevel: effectiveTierLevel(filterTierList, u.tierLevel, u.totalPoints ?? 0),
-          }))
-        : result.users
+      const { tiers, orderMap } = tierDataRef.current
+      const view = buildUserListView(allUsers, {
+        searchQuery,
+        tierFilter,
+        sortBy,
+        sortOrder,
+        page,
+        pageSize,
+        tierOrderMap: orderMap,
+        // Substitute the stored tierLevel with the effective tier (max of stored vs points-derived)
+        // so the table shows the same tier the mobile app does on Achievements/Profile. Falls back
+        // to the stored value until tier metadata has loaded.
+        resolveTier:
+          tiers.length > 0
+            ? (user) => effectiveTierLevel(tiers, user.tierLevel, user.totalPoints ?? 0)
+            : undefined,
+      })
 
-      // Client-side filtering for accurate search results (email, phone, or text)
-      let filteredUsers = usersWithEffectiveTier
-      let filteredTotal = result.total
+      // Reflect the effective tier on the rows the table renders, matching the resolver above.
+      const rows =
+        tiers.length > 0
+          ? view.rows.map((user) => ({
+              ...user,
+              tierLevel: effectiveTierLevel(tiers, user.tierLevel, user.totalPoints ?? 0),
+            }))
+          : view.rows
 
-      if (isEmailSearch || isPhoneSearch) {
-        filteredUsers = usersWithEffectiveTier.filter(user => {
-          if (isEmailSearch) {
-            return user.email?.toLowerCase().includes(trimmedSearch.toLowerCase())
-          }
-          if (isPhoneSearch) {
-            const userPhoneDigits = (user.phoneNumber || '').replace(/\D/g, '')
-            return userPhoneDigits.includes(digitsOnly)
-          }
-          return false
-        })
-        filteredTotal = filteredUsers.length
-
-        const startIndex = (page - 1) * pageSize
-        const endIndex = startIndex + pageSize
-        filteredUsers = filteredUsers.slice(startIndex, endIndex)
-      } else if (hasSearch) {
-        // Text search across firstname, lastname, username and email (case-insensitive).
-        // Token-based: every word of the query must appear in SOME field. Testing each field
-        // against the whole query instead meant a full name never matched — "Kelsey Cooper" found
-        // nobody because firstname holds only "Kelsey" and lastname only "Cooper".
-        filteredUsers = usersWithEffectiveTier.filter(user =>
-          matchesAllTokens(
-            [user.firstname, user.lastname, user.username, user.email],
-            trimmedSearch
-          )
-        )
-        filteredTotal = filteredUsers.length
-
-        const startIndex = (page - 1) * pageSize
-        const endIndex = startIndex + pageSize
-        filteredUsers = filteredUsers.slice(startIndex, endIndex)
-      }
-
-      // Email sort: client-side (email from Auth); sort then paginate
-      if (isEmailSort) {
-        const sorted = [...filteredUsers].sort((a, b) => {
-          const ea = (a.email ?? '').toLowerCase()
-          const eb = (b.email ?? '').toLowerCase()
-          const cmp = ea.localeCompare(eb)
-          return sortOrder === 'asc' ? cmp : -cmp
-        })
-        filteredTotal = sorted.length
-        const startIndex = (page - 1) * pageSize
-        filteredUsers = sorted.slice(startIndex, startIndex + pageSize)
-      }
-
-      // Tier sort: client-side by tier order rank (not lexicographic), then paginate
-      if (isTierSort) {
-        const getTierOrder = (tierLevel?: string) => {
-          const tier = String(tierLevel ?? '').trim()
-          if (!tier) return null
-          return tierOrderMap[tier] ?? null
-        }
-
-        const sorted = [...filteredUsers].sort((a, b) => {
-          const orderA = getTierOrder(a.tierLevel)
-          const orderB = getTierOrder(b.tierLevel)
-
-          // Keep unknown/empty tiers at the end regardless of direction
-          if (orderA == null && orderB != null) return 1
-          if (orderA != null && orderB == null) return -1
-          if (orderA == null && orderB == null) return 0
-
-          const cmp = (orderA as number) - (orderB as number)
-          return sortOrder === 'asc' ? cmp : -cmp
-        })
-
-        filteredTotal = sorted.length
-        const startIndex = (page - 1) * pageSize
-        filteredUsers = sorted.slice(startIndex, startIndex + pageSize)
-      }
-
-      // Extract pagination metadata
-      const totalPagesCount = Math.ceil(filteredTotal / pageSize)
-      setTotalUsers(filteredTotal)
-      setTotalPages(totalPagesCount)
-
-      // Handle edge case: if current page exceeds total pages, reset to last valid page or page 1
-      if (totalPagesCount > 0 && page > totalPagesCount) {
-        const lastValidPage = totalPagesCount
-        setCurrentPage(lastValidPage)
-        if (page !== lastValidPage) {
-          setIsLoading(false)
-          return fetchUsers(lastValidPage)
-        }
-      } else if (totalPagesCount === 0) {
-        setCurrentPage(1)
-      }
-
-      setUsers(filteredUsers)
-      setCurrentPage(page)
+      setTotalUsers(view.total)
+      setTotalPages(view.totalPages)
+      setUsers(rows)
+      setCurrentPage(view.page)
     } catch (err) {
       if (thisFetchId !== fetchIdRef.current) return
       console.error('Error fetching users:', err)
@@ -295,7 +241,6 @@ const Users = () => {
   const fetchTierOrder = async () => {
     try {
       const tiers = await tiersService.list()
-      setFilterTierList(tiers)
       const nextTierOrderMap = tiers.reduce<Record<string, number>>((acc, tier, index) => {
         const tierName = String(tier.name ?? '').trim()
         if (tierName) {
@@ -303,6 +248,10 @@ const Users = () => {
         }
         return acc
       }, {})
+      // Ref first, so a user load still in flight resolves effective tiers correctly; the state
+      // updates below drive the recompute for a list that has already rendered.
+      tierDataRef.current = { tiers, orderMap: nextTierOrderMap }
+      setFilterTierList(tiers)
       setTierOrderMap(nextTierOrderMap)
     } catch (err) {
       console.error('Error fetching tier order:', err)
@@ -312,10 +261,10 @@ const Users = () => {
 
   // If tier names in Appwrite change, clear a filter value that no longer exists (avoids empty lists).
   useEffect(() => {
-    if (tierFilter === 'All Tiers' || filterTierList.length === 0) return
+    if (tierFilter === ALL_TIERS || filterTierList.length === 0) return
     const valid = filterTierList.some((t) => String(t.name ?? '').trim() === tierFilter)
     if (!valid) {
-      setTierFilter('All Tiers')
+      setTierFilter(ALL_TIERS)
     }
   }, [filterTierList, tierFilter])
 
@@ -365,54 +314,23 @@ const Users = () => {
     return () => { cancelled = true }
   }, [searchParams, setSearchParams, addNotification])
 
-  // Refetch users when search query changes. When search is cleared, refetch immediately so the list resets; otherwise debounce.
+  // Recompute the visible page whenever any view input changes, always landing back on page 1.
+  //
+  // One effect, not three: search, tier filter and sort were separate effects, so clearing the
+  // search box — which also resets the tier filter and sort — fired several loads at once. Each of
+  // those was a full-collection read plus an Auth email fan-out, which is why production showed
+  // bursts of 54–163 Function executions for a single click. Now this is a pure in-memory
+  // recompute, so it also needs no debounce: results update as you type.
   useEffect(() => {
-    if (!isInitialLoad) {
-      if (searchTimeoutRef.current) {
-        clearTimeout(searchTimeoutRef.current)
-        searchTimeoutRef.current = null
-      }
-
-      const trimmed = searchQuery.trim()
-      if (trimmed === '') {
-        // Search cleared: refetch immediately so the full list is shown right away
-        fetchUsers(1)
-      } else {
-        // Typing: debounce to avoid a request on every keystroke
-        searchTimeoutRef.current = setTimeout(() => {
-          fetchUsers(1)
-        }, 300)
-      }
-
-      return () => {
-        if (searchTimeoutRef.current) {
-          clearTimeout(searchTimeoutRef.current)
-        }
-      }
-    }
+    if (isInitialLoad) return
+    fetchUsers(1)
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [searchQuery])
-
-  // Refetch users immediately when tier filter or sort changes (but not on initial load)
-  useEffect(() => {
-    if (!isInitialLoad) {
-      fetchUsers(1)
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tierFilter, sortBy, sortOrder])
-
-  // When tier ranks finish loading, refresh tier sort results once.
-  useEffect(() => {
-    if (!isInitialLoad && sortBy === 'tierLevel') {
-      fetchUsers(1)
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tierOrderMap])
+  }, [searchQuery, tierFilter, sortBy, sortOrder, tierOrderMap, filterTierList])
 
   // Handle search change; reset tier and sort to default when keyword is removed
   const handleSearchChange = (value: string) => {
     if (value.trim() === '') {
-      setTierFilter('All Tiers')
+      setTierFilter(ALL_TIERS)
       setSortBy('createdAt')
       setSortOrder('desc')
     }
@@ -455,7 +373,8 @@ const Users = () => {
     try {
       await appUsersService.create(userData)
       setCurrentPage(1)
-      await Promise.all([fetchUsers(1), fetchStatistics()])
+      // force: the new user is not in the cached set yet.
+      await Promise.all([fetchUsers(1, true), fetchStatistics()])
       setIsAddUserModalOpen(false)
       addNotification({
         type: 'success',
@@ -482,9 +401,9 @@ const Users = () => {
       // Check if we need to go back a page if current page becomes empty
       if (users.length === 1 && currentPage > 1) {
         setCurrentPage(currentPage - 1)
-        await Promise.all([fetchUsers(currentPage - 1), fetchStatistics()])
+        await Promise.all([fetchUsers(currentPage - 1, true), fetchStatistics()])
       } else {
-        await Promise.all([fetchUsers(currentPage), fetchStatistics()])
+        await Promise.all([fetchUsers(currentPage, true), fetchStatistics()])
       }
       setIsDeleteModalOpen(false)
       setUserToDelete(null)
@@ -534,8 +453,8 @@ const Users = () => {
         })
       }
       
-      // Refresh list and statistics
-      await fetchUsers(currentPage)
+      // Refresh list and statistics (force: isBlocked changed server-side)
+      await fetchUsers(currentPage, true)
       await fetchStatistics()
       
       // Update selectedUser with new blocked status to refresh Edit Modal
@@ -627,7 +546,7 @@ const Users = () => {
           users={users}
           isLoading={isLoading}
           searchTerm={searchQuery}
-          hasFilters={tierFilter !== 'All Tiers'}
+          hasFilters={tierFilter !== ALL_TIERS}
           currentPage={currentPage}
           totalPages={totalPages}
           totalUsers={totalUsers}
@@ -827,9 +746,9 @@ const Users = () => {
               }
             }
 
-            // Refresh the users list
-            await fetchUsers(currentPage)
-            
+            // Refresh the users list (force: the edited profile changed server-side)
+            await fetchUsers(currentPage, true)
+
             setIsEditUserModalOpen(false)
             setSelectedUser(null)
             setUserForEdit(null)

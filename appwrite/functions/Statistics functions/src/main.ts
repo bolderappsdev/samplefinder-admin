@@ -140,6 +140,12 @@ function calculateChange(current: number, previous: number): number {
 // rely on that default when aggregating across a whole table.
 const USER_SCAN_PAGE_SIZE = 100;
 
+// How many Auth user IDs to resolve per users.list call in /get-user-emails.
+// Appwrite rejects an equality query carrying more than 500 values, so stay
+// well under that; 100 keeps each request small while collapsing what used to
+// be 100 separate round trips into one.
+const AUTH_LOOKUP_CHUNK_SIZE = 100;
+
 /**
  * Sum lifetime points across every user profile.
  *
@@ -597,22 +603,54 @@ export default async function handler({ req, res, log, error }: any) {
       const emailMap: Record<string, string> = {};
       const lastLoginMap: Record<string, string> = {};
 
-      // Fetch emails and last login dates for each authID
-      for (const authID of body.authIDs) {
+      // Fetch in batches via users.list, NOT one users.get per authID.
+      //
+      // The per-ID loop this replaces was the admin panel's dominant cost: each Auth
+      // API call is a separate round trip, so a 25-ID request serialised 25 of them.
+      // Measured in production, this endpoint ran at p50 3.6s / p90 12.8s per
+      // execution, and a single Users-page search (which needs emails for every
+      // profile) fanned out to 27 executions — ~20s of waiting, ~77s when the
+      // search was refined. Query.equal('$id', [...]) resolves a whole batch in one
+      // round trip instead.
+      //
+      // It also lost data. This function's timeout is 15s, and 16% of those executions
+      // (97 of 596 sampled) hit it and returned a 500; the caller treats a failed
+      // execution as "no emails", so those users showed a blank email and last-login
+      // and could not be found by an email search.
+      //
+      // IDs that no longer exist in Auth are simply absent from the response, which
+      // matches the old per-ID behaviour of skipping on error.
+      for (let i = 0; i < body.authIDs.length; i += AUTH_LOOKUP_CHUNK_SIZE) {
+        const chunk = body.authIDs.slice(i, i + AUTH_LOOKUP_CHUNK_SIZE);
         try {
-          const user = await users.get(authID);
-          if (user) {
+          const page = await users.list([
+            Query.equal('$id', chunk),
+            Query.limit(chunk.length),
+          ]);
+          for (const user of page.users) {
             if (user.email) {
-              emailMap[authID] = user.email;
+              emailMap[user.$id] = user.email;
             }
             // accessedAt is the last time the user accessed the app
             if (user.accessedAt) {
-              lastLoginMap[authID] = user.accessedAt;
+              lastLoginMap[user.$id] = user.accessedAt;
             }
           }
         } catch (err) {
-          // User not found or error - skip
-          log(`Could not fetch user ${authID}: ${(err as Error).message}`);
+          // Batch failed (e.g. a malformed ID rejects the whole query) — fall back to
+          // per-ID lookups for this chunk only, so one bad ID can't blank out the rest.
+          log(
+            `Batch lookup failed for ${chunk.length} authIDs, falling back per-ID: ${(err as Error).message}`
+          );
+          for (const authID of chunk) {
+            try {
+              const user = await users.get(authID);
+              if (user?.email) emailMap[authID] = user.email;
+              if (user?.accessedAt) lastLoginMap[authID] = user.accessedAt;
+            } catch (innerErr) {
+              log(`Could not fetch user ${authID}: ${(innerErr as Error).message}`);
+            }
+          }
         }
       }
 
