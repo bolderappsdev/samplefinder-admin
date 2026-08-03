@@ -9,6 +9,7 @@
     "build": "node ./node_modules/typescript/bin/tsc && cp dist/main.js src/main.js",
     "test:local": "tsx test-local.ts",
     "test:reminders": "tsx test-reminders.ts",
+    "verify:badge-award": "npm run build && node scripts/verify-badge-award.mjs",
     "dev": "tsx watch src/main.ts"
   },
   "dependencies": {

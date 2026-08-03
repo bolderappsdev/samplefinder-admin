@@ -1253,17 +1253,106 @@ async function checkAndSendInactivityNotifications(databases, messaging, users, 
     log(`Inactivity: sent ${sent} notification(s)`);
     return { sent };
 }
+/** Points granted for an ambassador / influencer badge. Mirrored for display only in the mobile
+ * app's specialBadgeAwards.ts — this constant is the one that actually moves totalPoints. */
+const SPECIAL_BADGE_POINTS = 100;
+/**
+ * Reject a repeat award for the same badge within this window. The admin panel only calls
+ * /send-badge-notification on a genuine off -> on transition, so this only guards against a
+ * double-submit or an HTTP retry of the same grant — it deliberately does NOT block a legitimate
+ * re-grant days later (badge removed, then granted again).
+ */
+const BADGE_AWARD_IDEMPOTENCY_WINDOW_MS = 5 * 60 * 1000;
+/**
+ * Settings key controlling whether THIS function grants the badge points.
+ *
+ * Defaults to OFF when the setting is missing, and that default is deliberate: the mobile app used
+ * to grant these points itself, and the fix that stops it can only reach users through a full store
+ * release (the app has no expo-updates/OTA channel). Until old builds have aged out, a client on the
+ * old code still pays on its own, so if this function paid too, every grant would award 200.
+ *
+ * Shipping inert also protects against accidental activation — src/main.js is committed, so any
+ * unrelated deploy of this function would otherwise switch the payer over as a side effect.
+ *
+ * Flip it by creating/updating the settings row with this key and value "true" once the mobile
+ * release has adoption. No deploy required, and reversible the same way.
+ */
+const SETTING_SERVER_AWARDS_BADGE_POINTS = 'badgePointsAwardedByServer';
+/** Truthy spellings an admin might reasonably type into a Settings value. */
+function isSettingEnabled(value) {
+    if (!value)
+        return false;
+    const normalized = value.trim().toLowerCase();
+    return normalized === 'true' || normalized === '1' || normalized === 'yes' || normalized === 'on';
+}
+/**
+ * True when this profile already has a `badgeEarned` notification for `badgeType` recorded inside
+ * the idempotency window — i.e. this same grant was already processed.
+ */
+export function hasRecentBadgeAward(profile, badgeType, now) {
+    const raw = profile.notifications;
+    let list = [];
+    if (Array.isArray(raw)) {
+        list = raw;
+    }
+    else if (typeof raw === 'string' && raw) {
+        try {
+            const parsed = JSON.parse(raw);
+            list = Array.isArray(parsed) ? parsed : [];
+        }
+        catch {
+            list = [];
+        }
+    }
+    for (const item of list) {
+        let entry = null;
+        if (typeof item === 'string') {
+            try {
+                entry = JSON.parse(item);
+            }
+            catch {
+                entry = null;
+            }
+        }
+        else if (item && typeof item === 'object') {
+            entry = item;
+        }
+        if (!entry || entry.type !== 'badgeEarned')
+            continue;
+        const data = entry.data;
+        if (data?.badgeType !== badgeType)
+            continue;
+        const createdAt = Date.parse(String(entry.createdAt ?? ''));
+        if (!Number.isFinite(createdAt))
+            continue;
+        if (now - createdAt < BADGE_AWARD_IDEMPOTENCY_WINDOW_MS)
+            return true;
+    }
+    return false;
+}
 /**
  * BADGE EARNED NOTIFICATION
- * Sends a push notification when an admin assigns ambassador or influencer badge.
- * Called via POST /send-badge-notification.
+ * Sends a push notification AND awards the badge points when an admin assigns the ambassador or
+ * influencer badge. Called via POST /send-badge-notification.
  *
  * Title/message/type intentionally match the client's `syncSpecialBadgeAwards` output
  * so the mobile app treats this as the single source of truth for the badge notification
  * (mobile push handler skips persisting `badgeEarned` pushes, and the client sync uses
  * this unread notification instead of creating a duplicate in-app entry).
+ *
+ * The points award is gated behind the `badgePointsAwardedByServer` setting and is OFF until that
+ * row exists with value "true" — see SETTING_SERVER_AWARDS_BADGE_POINTS for the rollout reasoning.
+ *
+ * Once enabled, this handler is the single source of truth for the POINTS. The mobile app used to add them
+ * itself on a disabled -> enabled transition it detected from an AsyncStorage cache, so a reinstall
+ * or cleared app storage re-triggered the award and a badged user gained another 100 points with no
+ * activity — repeatable, and invisible in reports because the award had no dated record. The admin
+ * panel already computes the real transition (`nowAmbassador && !wasAmbassador`) against the stored
+ * profile before calling this endpoint, so this is the one place that knows a grant genuinely
+ * happened. Points are awarded only after push delivery succeeds, matching the birthday and
+ * anniversary handlers.
  */
-async function sendBadgeNotification(databases, messaging, userId, badgeType, log) {
+export async function sendBadgeNotification(databases, messaging, userId, badgeType, log) {
     log(`Badge notification: sending ${badgeType} badge notification for auth user ${userId}`);
     const title = badgeType === 'ambassador'
         ? 'NEW BADGE: CERTIFIED BRAND AMBASSADOR'
@@ -1276,12 +1365,41 @@ async function sendBadgeNotification(databases, messaging, userId, badgeType, lo
         throw new Error('Badge notification target profile not found');
     }
     const profile = profileResult.documents[0];
-    return await sendImmediateSystemNotificationToUser(databases, messaging, profile, title, body, 'badgeEarned', log, {
+    // Read before sending: sendImmediateSystemNotificationToUser appends this grant's own
+    // notification to the profile, which would otherwise look like a prior award.
+    const alreadyAwarded = hasRecentBadgeAward(profile, badgeType, Date.now());
+    const result = await sendImmediateSystemNotificationToUser(databases, messaging, profile, title, body, 'badgeEarned', log, {
         badgeType,
         isSpecialBadge: 'true',
-        pointsEarned: '100',
+        pointsEarned: String(SPECIAL_BADGE_POINTS),
         screen: 'Profile',
     });
+    const serverAwardsPoints = isSettingEnabled(await getSettingValue(databases, SETTING_SERVER_AWARDS_BADGE_POINTS));
+    if (!serverAwardsPoints) {
+        log(`Badge notification: ${badgeType} points NOT awarded — "${SETTING_SERVER_AWARDS_BADGE_POINTS}" is not enabled, so the mobile app is still the payer. Enable it once the release that removes the client-side award has adoption.`);
+        return result;
+    }
+    if (alreadyAwarded) {
+        log(`Badge notification: ${badgeType} points NOT awarded to ${profile.$id} — an award for this badge was already recorded within the idempotency window`);
+        return result;
+    }
+    // Re-read so the increment is based on the freshest total: appending the notification above, and
+    // any concurrent check-in or trivia answer, may have moved totalPoints since the first read.
+    try {
+        const fresh = (await databases.getDocument(DATABASE_ID, USER_PROFILES_TABLE_ID, profile.$id));
+        const currentPoints = Number(fresh.totalPoints) || 0;
+        await databases.updateDocument(DATABASE_ID, USER_PROFILES_TABLE_ID, profile.$id, {
+            totalPoints: currentPoints + SPECIAL_BADGE_POINTS,
+        });
+        log(`Badge notification: awarded ${SPECIAL_BADGE_POINTS} ${badgeType} points to ${profile.$id}; totalPoints ${currentPoints} -> ${currentPoints + SPECIAL_BADGE_POINTS}`);
+    }
+    catch (err) {
+        // The badge and its notification are already delivered; surface the points failure without
+        // failing the whole request, so the admin sees the badge applied and can re-check the total.
+        const msg = err instanceof Error ? err.message : String(err);
+        log(`Badge notification: FAILED to award ${badgeType} points to ${profile.$id}: ${msg}`);
+    }
+    return result;
 }
 /**
  * TIER CHANGED NOTIFICATION
