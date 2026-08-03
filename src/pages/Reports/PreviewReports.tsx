@@ -172,8 +172,10 @@ const PreviewReports = () => {
     '8': 'eventDate',
     '9': 'triviaDate'
   }
-  // Numeric columns that should sort descending (e.g. points, counts) so higher values appear first
-  const descendingNumericKeys = new Set(['userPoints', 'checkInReviewPoints', 'checkInPoints', 'reviewPoints', 'triviaPoints', 'checkIns', 'reviews', 'triviasWon', 'favorites', 'reviewStars', 'totalResponses', 'totalCorrect', 'totalPointsAwarded'])
+  // Numeric columns that should sort descending (e.g. points, counts) so higher values appear first.
+  // Every points/count column of the Points Earned reports belongs here — "sort by Lifetime Points"
+  // showing the smallest totals first reads as yet another reporting bug.
+  const descendingNumericKeys = new Set(['userPoints', 'checkInReviewPoints', 'checkInPoints', 'reviewPoints', 'triviaPoints', 'signupPoints', 'referralPoints', 'referrerPoints', 'referralsMade', 'referralsCount', 'lifetimePoints', 'unattributedPoints', 'checkIns', 'reviews', 'triviasWon', 'favorites', 'reviewStars', 'totalResponses', 'totalCorrect', 'totalPointsAwarded'])
 
   const parseSortableDate = (value: string | number): number => {
     if (value === '' || value === undefined || value === null) return NaN

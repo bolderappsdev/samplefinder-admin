@@ -6,6 +6,7 @@ import { appUsersService, locationsService } from '../../../lib/services'
 import { useUnsavedChanges } from '../../../hooks/useUnsavedChanges'
 import { UnsavedChangesModal } from '../../../components'
 import { appTimeToUTC, DEFAULT_APP_TIMEZONE, getTodayDateStringInTimezone } from '../../../lib/dateUtils'
+import { matchesAllTokens } from '../../../lib/userSearch'
 
 interface CreateNotificationModalProps {
   isOpen: boolean
@@ -424,16 +425,14 @@ const CreateNotificationModal = ({
       ? `${user.firstName} ${user.lastName}`
       : user.username || user.email || 'Unknown User'
 
-  const filteredUsers = users.filter((user) => {
-    if (!userSearchQuery) return true
-    const searchLower = userSearchQuery.toLowerCase()
-    return (
-      user.firstName?.toLowerCase().includes(searchLower) ||
-      user.lastName?.toLowerCase().includes(searchLower) ||
-      user.email?.toLowerCase().includes(searchLower) ||
-      user.username?.toLowerCase().includes(searchLower)
+  // Token-based so picking a recipient by full name works: testing each field against the whole
+  // query meant "Kelsey Cooper" matched nobody, since no single field holds both words.
+  const filteredUsers = users.filter((user) =>
+    matchesAllTokens(
+      [user.firstName, user.lastName, user.email, user.username],
+      userSearchQuery
     )
-  }).sort((a, b) => getUserDisplayName(a).localeCompare(getUserDisplayName(b), undefined, { sensitivity: 'base' }))
+  ).sort((a, b) => getUserDisplayName(a).localeCompare(getUserDisplayName(b), undefined, { sensitivity: 'base' }))
 
   return (
     <>

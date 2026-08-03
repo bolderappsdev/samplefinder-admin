@@ -1,12 +1,14 @@
-import { eventsService, clientsService, appUsersService, userProfilesService, categoriesService, locationsService, reviewsService, triviaService, triviaResponsesService, checkinsService, settingsService, isCorrectTriviaResponse } from './services'
-import type { EventDocument, ClientDocument, AppUser, UserProfile, TriviaDocument, TriviaResponseDocument, ReviewDocument, CheckinDocument } from './services'
+import { eventsService, clientsService, appUsersService, categoriesService, locationsService, reviewsService, triviaService, triviaResponsesService, checkinsService, settingsService, isCorrectTriviaResponse } from './services'
+import type { EventDocument, ClientDocument, AppUser, TriviaDocument, TriviaResponseDocument, ReviewDocument, CheckinDocument } from './services'
 import { Query } from './appwrite'
 import {
   aggregatePointsEarnedInRange,
   breakdownCheckInReviewPoints,
   breakdownTotalPoints,
+  createdAtRangeFilter,
   emptyPointsBreakdown,
   SIGNUP_BONUS_POINTS,
+  unattributedPoints,
   type PointsEarnedBreakdown,
   type TriviaPointInfo,
 } from './reportPoints'
@@ -144,12 +146,17 @@ const pointsEarnedColumns: ReportColumn[] = [
   { header: 'Trivias Won', key: 'triviasWon' },
 ]
 
-// Points Earned (Date Range) columns. Unlike the lifetime "All" report — whose total
-// (user_profiles.totalPoints) also folds in badge/birthday bonuses and so cannot be fully broken
-// down — this report's total is summed from dated activity plus the signup and referee-referral
-// bonuses (attributed to the user's $createdAt), so we expose the points from EACH source.
-// Invariant: Points Earned (Range) = Check-in + Review + Trivia + Signup + Referral Points,
-// letting the row reconcile against its own breakdown.
+// Points Earned (Date Range) columns. This report's total is summed from dated activity plus the
+// signup and both referral bonuses (attributed to the invitee's $createdAt), so we expose the points
+// from EACH source.
+//
+// Two invariants make every row self-checking, which is what lets a reader trust the ranking:
+//   Points Earned (Range) = Check-in + Review + Trivia + Signup + Referral (Joined) + Referral (Invited)
+//   Lifetime Points       = <all-time value of the same sum> + Unattributed Points
+// The second one exists because lifetime totalPoints also folds in birthday, anniversary,
+// special-badge and manually-edited points, none of which can be dated. Without the Unattributed
+// column a user with 1130 lifetime points and 300 in range looks like a reporting error; with it,
+// the 830 has a name.
 const pointsEarnedDateRangeColumns: ReportColumn[] = [
   { header: 'First Name', key: 'firstName' },
   { header: 'Last Name', key: 'lastName' },
@@ -160,10 +167,14 @@ const pointsEarnedDateRangeColumns: ReportColumn[] = [
   { header: 'Review Points (Range)', key: 'reviewPoints' },
   { header: 'Trivia Points (Range)', key: 'triviaPoints' },
   { header: 'Signup Points (Range)', key: 'signupPoints' },
-  { header: 'Referral Points (Range)', key: 'referralPoints' },
+  { header: 'Referral Pts — Joined (Range)', key: 'referralPoints' },
+  { header: 'Referral Pts — Invited (Range)', key: 'referrerPoints' },
   { header: 'Check-Ins (Range)', key: 'checkIns' },
   { header: 'Reviews (Range)', key: 'reviews' },
   { header: 'Trivias Won (Range)', key: 'triviasWon' },
+  { header: 'Referrals Made (Range)', key: 'referralsMade' },
+  { header: 'Lifetime Points', key: 'lifetimePoints' },
+  { header: 'Unattributed Points', key: 'unattributedPoints' },
 ]
 
 /**
@@ -177,6 +188,10 @@ const USER_RANGE_COLUMN_HEADERS: Record<string, string> = {
   checkIns: 'Check-Ins (Range)',
   reviews: 'Reviews (Range)',
   triviasWon: 'Trivias Won (Range)',
+  referrerPoints: 'Referral Pts — Invited (Range)',
+  referralsMade: 'Referrals Made (Range)',
+  // Stays lifetime while a range is active — label it so it can't be misread as range-scoped.
+  referralsCount: '# of Referrals (Lifetime)',
 }
 
 // Event Recap columns
@@ -380,8 +395,13 @@ const wrapTextForPdf = (text: string, maxCharsPerLine = 35): string => {
 
 // Column keys that hold display dates (MM/DD/YYYY or YYYY-MM-DD) for sort order in exports
 const SORT_DATE_COLUMN_KEYS = new Set(['dob', 'signUpDate', 'lastLoginDate', 'date', 'eventDate', 'signupDate'])
-// Numeric columns that sort descending in export so order matches Preview Reports UI
-const SORT_DESCENDING_NUMERIC_KEYS = new Set(['userPoints', 'checkInReviewPoints', 'checkIns', 'reviews', 'triviasWon', 'favorites', 'checkInPoints', 'reviewPoints', 'triviaPoints', 'referralsCount'])
+// Numeric columns that sort descending in export so order matches Preview Reports UI.
+// Keep in sync with descendingNumericKeys in src/pages/Reports/PreviewReports.tsx — a key missing
+// here silently exports a report ordered the opposite way from the preview the user just approved.
+// 'reviewStars', 'totalResponses', 'totalCorrect' and 'totalPointsAwarded' were descending in the
+// preview but missing here, so sorting an Event Reviews or Trivia report by one of them previewed
+// highest-first and downloaded lowest-first.
+const SORT_DESCENDING_NUMERIC_KEYS = new Set(['userPoints', 'checkInReviewPoints', 'checkIns', 'reviews', 'triviasWon', 'favorites', 'checkInPoints', 'reviewPoints', 'triviaPoints', 'signupPoints', 'referralPoints', 'referrerPoints', 'referralsMade', 'referralsCount', 'lifetimePoints', 'unattributedPoints', 'reviewStars', 'totalResponses', 'totalCorrect', 'totalPointsAwarded'])
 
 // Default sort key per report when the caller doesn't pass one. Points reports rank by points
 // descending (winner first) instead of falling back to the first column (alphabetical by name),
@@ -595,20 +615,6 @@ async function fetchTriviasWonCountByUser(): Promise<Map<string, number>> {
 const REPORT_CHECKINS_PAGE_SIZE = 500
 const REPORT_TRIVIA_RESPONSES_PAGE_SIZE = 500
 
-/** Build the $createdAt window queries shared by all in-range record fetches. */
-function createdAtRangeQueries(dateRange?: { start: Date | null; end: Date | null }): string[] {
-  const queries: string[] = []
-  if (dateRange?.start) {
-    queries.push(Query.greaterThanEqual('$createdAt', dateRange.start.toISOString()))
-  }
-  if (dateRange?.end) {
-    const endDate = new Date(dateRange.end)
-    endDate.setHours(23, 59, 59, 999)
-    queries.push(Query.lessThanEqual('$createdAt', endDate.toISOString()))
-  }
-  return queries
-}
-
 /**
  * Page through a collection's list endpoint, appending the given filter queries.
  * Uses cursor pagination (not offset) so it has no 5,000-row ceiling — the date-range
@@ -655,47 +661,105 @@ async function fetchTriviaPointInfoById(): Promise<Map<string, TriviaPointInfo>>
 }
 
 /**
- * Points earned per user within a date range. Sums the dated records — check-ins
- * (checkins.points) + reviews (reviews.pointsEarned) + trivia wins (trivia.points) — and adds the
- * signup welcome bonus plus the referee referral bonus for users whose account was created in the
- * window, attributed to user_profiles.$createdAt (those bonuses have no dated record of their own;
- * referral is counted only when usedReferralCode is set). Used by the "Points Earned (Date Range)"
- * report so the ranking reflects the selected window rather than the lifetime
- * user_profiles.totalPoints. Badge / birthday bonuses remain excluded (no dated record or proxy).
+ * Every dated record the points aggregation reads, fetched ONCE and unfiltered, plus the
+ * configuration needed to price a referral.
+ *
+ * Deliberately unfiltered: the "Points Earned (Date Range)" report needs two windows from the same
+ * data — the selected range, and all-time for the Unattributed column that reconciles the range
+ * against lifetime `totalPoints`. Fetching once and slicing in memory keeps those two numbers on a
+ * single basis. Pushing a `$createdAt` filter into the query for one window and not the other is
+ * how the two halves of a report drift apart.
  */
-async function fetchPointsEarnedInRangeByUser(
-  dateRange?: { start: Date | null; end: Date | null }
-): Promise<Map<string, PointsEarnedBreakdown>> {
-  const filterQueries = createdAtRangeQueries(dateRange)
-  const [checkins, reviews, triviaResponses, triviaById, signupUsers, refereePts] =
+interface PointsEarnedSources {
+  checkins: CheckinDocument[]
+  reviews: ReviewDocument[]
+  triviaResponses: TriviaResponseDocument[]
+  triviaById: Map<string, TriviaPointInfo>
+  /** The whole roster — referrers usually predate any window, so the code map needs all of them. */
+  users: AppUser[]
+  refereePts: number
+  referrerPts: number
+  referrerIdByCode: Map<string, string>
+}
+
+async function fetchPointsEarnedSources(users: AppUser[]): Promise<PointsEarnedSources> {
+  const [checkins, reviews, triviaResponses, triviaById, refereePts, referrerPts] =
     await Promise.all([
-      listAllPaged<CheckinDocument>(checkinsService, filterQueries, REPORT_CHECKINS_PAGE_SIZE),
-      listAllPaged<ReviewDocument>(reviewsService, filterQueries, REPORT_REVIEWS_PAGE_SIZE),
-      listAllPaged<TriviaResponseDocument>(triviaResponsesService, filterQueries, REPORT_TRIVIA_RESPONSES_PAGE_SIZE),
+      listAllPaged<CheckinDocument>(checkinsService, [], REPORT_CHECKINS_PAGE_SIZE),
+      listAllPaged<ReviewDocument>(reviewsService, [], REPORT_REVIEWS_PAGE_SIZE),
+      listAllPaged<TriviaResponseDocument>(triviaResponsesService, [], REPORT_TRIVIA_RESPONSES_PAGE_SIZE),
       fetchTriviaPointInfoById(),
-      // Users created within the window carry their welcome + referral bonus on $createdAt. Read the
-      // raw user_profiles list (not fetchAllAppUsers) over the same window, so we skip the per-batch
-      // email-enrichment Cloud Function calls — only $id and usedReferralCode are needed here.
-      listAllPaged<UserProfile>(userProfilesService, filterQueries, REPORT_USERS_PAGE_SIZE),
       settingsService.getRefereeReferralPoints(),
+      settingsService.getReferrerReferralPoints(),
     ])
   if (refereePts == null) {
     console.warn(
-      '[points-report] referee referral points setting (ref_setting_referee_pts) missing or invalid — referral points will show 0'
+      '[points-report] referee referral points setting (ref_setting_referee_pts) missing or invalid — referee referral points will show 0'
     )
   }
-  const signups = signupUsers.map((u) => ({
-    user: u.$id,
-    usedReferralCode: (u as Record<string, unknown>).usedReferralCode as string | null | undefined,
-  }))
-  return aggregatePointsEarnedInRange({
+  if (referrerPts == null) {
+    console.warn(
+      '[points-report] referrer referral points setting (ref_setting_referrer_pts) missing or invalid — referrer referral points will show 0'
+    )
+  }
+
+  // referralCode -> owning user. Mirrors the Mobile API's lookup, which queries the canonical
+  // `referralCode` attribute (not the legacy misspelled `referalCode`) with limit 1, so a duplicated
+  // code resolves to the same first-wins owner there and here.
+  const referrerIdByCode = new Map<string, string>()
+  for (const user of users) {
+    const code = ((user as Record<string, unknown>).referralCode as string | undefined)?.trim()
+    const id = (user as { $id?: string }).$id
+    if (!code || !id || referrerIdByCode.has(code)) continue
+    referrerIdByCode.set(code, id)
+  }
+
+  return {
     checkins,
     reviews,
     triviaResponses,
     triviaById,
+    users,
+    refereePts: refereePts ?? 0,
+    referrerPts: referrerPts ?? 0,
+    referrerIdByCode,
+  }
+}
+
+/**
+ * Points earned per user within a window (pass no range for all-time). Sums the dated records —
+ * check-ins (checkins.points) + reviews (reviews.pointsEarned) + trivia wins (trivia.points) — and
+ * adds the signup welcome bonus, the referee referral bonus, and the referrer referral bonus for
+ * every account created in the window, all attributed to that account's `$createdAt` (none of the
+ * three has a dated record of its own).
+ *
+ * Used by "Points Earned (Date Range)" and by a Report Builder users report with a date range, so
+ * the ranking reflects the selected window rather than lifetime `user_profiles.totalPoints`.
+ * Birthday / anniversary / special-badge bonuses and manual point edits remain unattributable —
+ * see `unattributedPoints` in ./reportPoints, which reports that residue rather than hiding it.
+ */
+function aggregatePointsForWindow(
+  sources: PointsEarnedSources,
+  dateRange?: { start: Date | null; end: Date | null }
+): Map<string, PointsEarnedBreakdown> {
+  const inRange = createdAtRangeFilter(dateRange)
+  const signups = sources.users
+    .filter((u) => inRange((u as { $createdAt?: string }).$createdAt))
+    .map((u) => ({
+      user: (u as { $id?: string }).$id,
+      usedReferralCode: (u as Record<string, unknown>).usedReferralCode as string | null | undefined,
+    }))
+
+  return aggregatePointsEarnedInRange({
+    checkins: sources.checkins.filter((c) => inRange(c.$createdAt)),
+    reviews: sources.reviews.filter((r) => inRange(r.$createdAt)),
+    triviaResponses: sources.triviaResponses.filter((r) => inRange(r.$createdAt)),
+    triviaById: sources.triviaById,
     signups,
     signupBonus: SIGNUP_BONUS_POINTS,
-    refereePts: refereePts ?? 0,
+    refereePts: sources.refereePts,
+    referrerIdByCode: sources.referrerIdByCode,
+    referrerPts: sources.referrerPts,
   })
 }
 
@@ -1717,10 +1781,16 @@ export const exportService = {
     const scopeActivityToRange = Boolean(dateRange?.start || dateRange?.end)
     const users = await fetchAllAppUsers()
     const referralsCountByCode = buildReferralsCountByCode(users)
-    // In-range activity and the all-time maps are mutually exclusive — only fetch what's used.
-    const earnedInRangeByUser = scopeActivityToRange
-      ? await fetchPointsEarnedInRangeByUser(dateRange)
-      : null
+    // These columns are derived from the dated records, so they need the aggregation even when no
+    // range is selected — otherwise picking "Unattributed Points" on its own reports zero for
+    // everyone, which reads as "nothing to explain" rather than "not calculated".
+    const needsPointsSources =
+      scopeActivityToRange ||
+      columnKeys.some(key => key === 'unattributedPoints' || key === 'referrerPoints' || key === 'referralsMade')
+    // One fetch feeds both windows (see fetchPointsEarnedSources).
+    const sources = needsPointsSources ? await fetchPointsEarnedSources(users) : null
+    const earnedInRangeByUser = sources && scopeActivityToRange ? aggregatePointsForWindow(sources, dateRange) : null
+    const earnedAllTimeByUser = sources ? aggregatePointsForWindow(sources) : null
     const checkInReviewPointsByUser = scopeActivityToRange ? null : await fetchCheckInReviewPointsByUser()
     const triviasWonByUser = scopeActivityToRange ? null : await fetchTriviasWonCountByUser()
 
@@ -1731,6 +1801,10 @@ export const exportService = {
       const inRange = earnedInRangeByUser
         ? (userId ? earnedInRangeByUser.get(userId) : undefined) ?? emptyPointsBreakdown()
         : null
+      const allTime = earnedAllTimeByUser
+        ? (userId ? earnedAllTimeByUser.get(userId) : undefined) ?? emptyPointsBreakdown()
+        : null
+      const lifetimePoints = (userRecord.totalPoints as number) ?? 0
       const row: Record<string, string | number> = {}
 
       columnKeys.forEach(key => {
@@ -1767,9 +1841,26 @@ export const exportService = {
             row[key] = code ? (referralsCountByCode.get(code) ?? 0) : 0
             break
           case 'userPoints':
-            row[key] = inRange
-              ? breakdownTotalPoints(inRange)
-              : (userRecord.totalPoints as number) ?? 0
+            row[key] = inRange ? breakdownTotalPoints(inRange) : lifetimePoints
+            break
+          case 'lifetimePoints':
+            // Always lifetime, range or not — the point of the column is to sit next to the
+            // range total so the difference is visible instead of looking like a missing row.
+            row[key] = lifetimePoints
+            break
+          case 'unattributedPoints':
+            // Lifetime minus everything datable — always measured against the ALL-TIME window, not
+            // the selected one. Measuring it against the range would label every point earned
+            // outside the window as unexplained.
+            row[key] = allTime ? unattributedPoints(lifetimePoints, allTime) : 0
+            break
+          case 'referrerPoints':
+            // Range-scoped when a range is set, otherwise lifetime — matching how every other
+            // activity column on this report behaves.
+            row[key] = (inRange ?? allTime)?.referrerPoints ?? 0
+            break
+          case 'referralsMade':
+            row[key] = (inRange ?? allTime)?.referralsMade ?? 0
             break
           case 'checkInReviewPoints':
             row[key] = inRange
@@ -2070,15 +2161,18 @@ export const exportService = {
     }
 
     if (useDateRangeForPoints) {
-      const [usersResult, earnedByUser] = await Promise.all([
-        fetchAllAppUsers(),
-        fetchPointsEarnedInRangeByUser(dateRange),
-      ])
+      const usersResult = await fetchAllAppUsers()
+      // One fetch, two windows: the selected range drives the ranking, all-time drives the
+      // Unattributed column. Both come off the same records so the row reconciles by construction.
+      const sources = await fetchPointsEarnedSources(usersResult)
+      const earnedByUser = aggregatePointsForWindow(sources, dateRange)
+      const earnedAllTimeByUser = aggregatePointsForWindow(sources)
 
       const rows = usersResult.map((user: AppUser) => {
         const userRecord = user as Record<string, unknown>
         const userId = (user as { $id?: string }).$id
         const breakdown = (userId ? earnedByUser.get(userId) : undefined) ?? emptyPointsBreakdown()
+        const allTime = (userId ? earnedAllTimeByUser.get(userId) : undefined) ?? emptyPointsBreakdown()
         const lifetimePoints = (userRecord.totalPoints as number) ?? (userRecord.userPoints as number) ?? 0
 
         return {
@@ -2088,18 +2182,23 @@ export const exportService = {
           email: user.email || '',
           lastLoginDate: formatDate(user.lastLoginDate, appTimezone),
           tierLevel: deriveTier((userRecord.tierLevel as string) || '', lifetimePoints),
-          // Points earned in the selected window (check-in + review + trivia + signup + referral);
-          // drives the ranking. The per-source point columns below sum exactly to userPoints
-          // (see breakdownTotalPoints).
+          // Points earned in the selected window; drives the ranking. The per-source point columns
+          // below sum exactly to userPoints (see breakdownTotalPoints).
           userPoints: breakdownTotalPoints(breakdown).toString(),
           checkInPoints: breakdown.checkInPoints.toString(),
           reviewPoints: breakdown.reviewPoints.toString(),
           triviaPoints: breakdown.triviaPoints.toString(),
           signupPoints: breakdown.signupPoints.toString(),
           referralPoints: breakdown.referralPoints.toString(),
+          referrerPoints: breakdown.referrerPoints.toString(),
           checkIns: breakdown.checkInCount.toString(),
           reviews: breakdown.reviewCount.toString(),
           triviasWon: breakdown.triviaWins.toString(),
+          referralsMade: breakdown.referralsMade.toString(),
+          // Lifetime alongside in-range so a user whose points predate the window (or came from a
+          // source with no date) is visibly present rather than looking absent.
+          lifetimePoints: lifetimePoints.toString(),
+          unattributedPoints: unattributedPoints(lifetimePoints, allTime).toString(),
         }
       })
 

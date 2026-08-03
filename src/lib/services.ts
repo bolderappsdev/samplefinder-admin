@@ -2168,6 +2168,30 @@ export interface SettingsDocument extends Models.Document {
   [key: string]: unknown
 }
 
+/**
+ * Read one of the two referral-bonus Settings docs BY DOCUMENT ID, mirroring the Mobile API's
+ * getReferralPointSettings (appwrite/functions/Mobile API/src/main.ts) so the admin reports price a
+ * referral exactly the way the function that awarded it did. Returns null — never a silent 0 — when
+ * the doc is missing or the value is not a non-negative integer, so callers can warn instead of
+ * quietly under-reporting.
+ */
+async function readReferralPointsSetting(
+  documentId: string,
+  label: string
+): Promise<number | null> {
+  try {
+    const doc = await DatabaseService.getById<SettingsDocument>(
+      appwriteConfig.collections.settings,
+      documentId
+    )
+    const value = parseInt(doc.value, 10)
+    return Number.isFinite(value) && value >= 0 ? value : null
+  } catch (error) {
+    console.error(`Error fetching ${label} referral points setting:`, error)
+    return null
+  }
+}
+
 // Settings service
 export const settingsService = {
   // Get a setting by key
@@ -2240,17 +2264,17 @@ export const settingsService = {
    * Returns null if the setting is missing or not a valid non-negative integer.
    */
   getRefereeReferralPoints: async (): Promise<number | null> => {
-    try {
-      const doc = await DatabaseService.getById<SettingsDocument>(
-        appwriteConfig.collections.settings,
-        'ref_setting_referee_pts'
-      )
-      const value = parseInt(doc.value, 10)
-      return Number.isFinite(value) && value >= 0 ? value : null
-    } catch (error) {
-      console.error('Error fetching referee referral points setting:', error)
-      return null
-    }
+    return readReferralPointsSetting('ref_setting_referee_pts', 'referee')
+  },
+
+  /**
+   * Referrer (inviter) referral bonus. Same contract as getRefereeReferralPoints, for the doc whose
+   * $id is 'ref_setting_referrer_pts' — the other half of the award the Mobile API's processReferral
+   * hands out. Reports that count only the referee side credit nothing to the user who did the
+   * inviting, so a prolific referrer's points look like they came from nowhere.
+   */
+  getReferrerReferralPoints: async (): Promise<number | null> => {
+    return readReferralPointsSetting('ref_setting_referrer_pts', 'referrer')
   },
 
   /** Get app timezone (IANA). Defaults to America/New_York if not set. */

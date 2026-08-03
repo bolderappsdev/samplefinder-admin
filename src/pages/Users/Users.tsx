@@ -29,6 +29,7 @@ import {
 } from '../../lib/services'
 import { Query, storage, appwriteConfig, ID } from '../../lib/appwrite'
 import { storedDobToDateInputValue } from '../../lib/formUtils'
+import { matchesAllTokens } from '../../lib/userSearch'
 
 // Build a human-readable label for confirmation modals (e.g. "user
 // John Smith", "user @jsmith", "user jsmith@example.com"). Returns
@@ -175,11 +176,14 @@ const Users = () => {
         const endIndex = startIndex + pageSize
         filteredUsers = filteredUsers.slice(startIndex, endIndex)
       } else if (hasSearch) {
-        // Text search: match against firstname, lastname, username, AND email (case-insensitive)
-        const lowerSearch = trimmedSearch.toLowerCase()
+        // Text search across firstname, lastname, username and email (case-insensitive).
+        // Token-based: every word of the query must appear in SOME field. Testing each field
+        // against the whole query instead meant a full name never matched — "Kelsey Cooper" found
+        // nobody because firstname holds only "Kelsey" and lastname only "Cooper".
         filteredUsers = usersWithEffectiveTier.filter(user =>
-          [user.firstname, user.lastname, user.username, user.email].some(field =>
-            field != null && String(field).toLowerCase().includes(lowerSearch)
+          matchesAllTokens(
+            [user.firstname, user.lastname, user.username, user.email],
+            trimmedSearch
           )
         )
         filteredTotal = filteredUsers.length

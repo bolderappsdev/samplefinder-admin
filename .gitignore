@@ -35,3 +35,6 @@ scripts/.ptcheck/
 
 # transient tsc output for scripts/verify-report-builder-source.mjs
 scripts/.rbcheck/
+
+# transient tsc output for scripts/verify-user-search.mjs
+scripts/.uscheck/
