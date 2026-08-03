@@ -1,6 +1,11 @@
 import { useState, useEffect, useRef } from 'react'
 import { Icon } from '@iconify/react'
-import { tiersService, type TierDocument, appUsersService } from '../../../lib/services'
+import {
+  tiersService,
+  type TierDocument,
+  appUsersService,
+  userProfilesService,
+} from '../../../lib/services'
 import { useUnsavedChanges } from '../../../hooks/useUnsavedChanges'
 import { UnsavedChangesModal } from '../../../components'
 import { Query } from '../../../lib/appwrite'
@@ -186,11 +191,16 @@ const AddUserModal = ({ isOpen, onClose, onSave }: AddUserModalProps) => {
     })
 
     try {
-      const result = await appUsersService.listWithPagination([
-        Query.equal('username', username.trim())
+      // userProfilesService, not appUsersService: the latter resolves an Auth email for every
+      // matched profile through the get-user-emails Function, and this check runs per keystroke.
+      // Username lives on the profile, so the extra round trip bought nothing.
+      const result = await userProfilesService.list([
+        Query.select(['$id', 'username']),
+        Query.equal('username', username.trim()),
+        Query.limit(1),
       ])
 
-      if (result.users.length > 0) {
+      if (result.documents.length > 0) {
         setUsernameValidation({
           isChecking: false,
           isAvailable: false,
@@ -272,8 +282,11 @@ const AddUserModal = ({ isOpen, onClose, onSave }: AddUserModalProps) => {
         const formattedForQuery = formatted
         phoneCheckTimeoutRef.current = setTimeout(async () => {
           try {
-            const result = await appUsersService.listWithPagination([
+            // Profile-only lookup — see the username check above for why this avoids appUsersService.
+            const result = await userProfilesService.list([
+              Query.select(['$id', 'phoneNumber']),
               Query.equal('phoneNumber', formattedForQuery),
+              Query.limit(1),
             ])
 
             if (result.total > 0) {

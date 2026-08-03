@@ -15,7 +15,8 @@
     "verify:report-builder": "tsc src/lib/reportBuilderSource.ts src/lib/reportBuilderConfig.ts --outDir scripts/.rbcheck --target es2020 --module es2020 --moduleResolution bundler --skipLibCheck --jsx react-jsx && node scripts/verify-report-builder-source.mjs",
     "verify:points": "tsc src/lib/reportPoints.ts --outDir scripts/.ptcheck --target es2020 --module es2020 --skipLibCheck && node scripts/verify-points-earned.mjs",
     "verify:user-search": "tsc src/lib/userSearch.ts --outDir scripts/.uscheck --target es2020 --module es2020 --skipLibCheck && node scripts/verify-user-search.mjs",
-    "verify": "npm run verify:points && npm run verify:user-search && npm run verify:report-builder"
+    "verify:user-list-view": "tsc src/lib/userListView.ts src/lib/userSearch.ts --outDir scripts/.ulvcheck --target es2020 --module commonjs --skipLibCheck && node -e \"require('fs').writeFileSync('scripts/.ulvcheck/package.json','{\\\"type\\\":\\\"commonjs\\\"}')\" && node scripts/verify-user-list-view.mjs",
+    "verify": "npm run verify:points && npm run verify:user-search && npm run verify:user-list-view && npm run verify:report-builder"
   },
   "dependencies": {
     "@iconify/react": "^6.0.2",

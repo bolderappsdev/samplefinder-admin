@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { Icon } from '@iconify/react'
-import { appUsersService } from '../../../lib/services'
+import { userProfilesService } from '../../../lib/services'
 import { useUnsavedChanges } from '../../../hooks/useUnsavedChanges'
 import { UnsavedChangesModal } from '../../../components'
 import { Query } from '../../../lib/appwrite'
@@ -232,12 +232,16 @@ const EditUserModal = ({
     })
 
     try {
-      const result = await appUsersService.listWithPagination([
-        Query.equal('username', username.trim())
+      // userProfilesService, not appUsersService: the latter resolves an Auth email for every
+      // matched profile through the get-user-emails Function, and this check runs per keystroke.
+      // Username lives on the profile, so the extra round trip bought nothing.
+      const result = await userProfilesService.list([
+        Query.select(['$id', 'username']),
+        Query.equal('username', username.trim()),
       ])
 
       // Check if username exists for a different user (exclude current user)
-      const duplicateUser = result.users.find(user => user.$id !== userId)
+      const duplicateUser = result.documents.find(user => user.$id !== userId)
       
       if (duplicateUser) {
         setUsernameValidation({

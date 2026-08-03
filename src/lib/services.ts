@@ -19,6 +19,36 @@ export const COLLECTION_IDS = {
   LOCATIONS: 'locations',
 } as const
 
+/**
+ * Short-lived cache of whole-collection reads for DatabaseService.searchAll.
+ *
+ * searchAll fetches every row matching `baseQueries` and then filters by the search term in the
+ * browser. The term is not part of the server query, so typing re-read the entire collection once
+ * per character — and the Locations, Categories, Trivia and Clients pages refetch on every keystroke
+ * with no debounce. Each of those reads costs a ~0.5s round trip, so a six-letter search spent
+ * several seconds re-fetching identical rows.
+ *
+ * Entries are keyed by collection + baseQueries, expire quickly, and are dropped outright whenever
+ * a document in that collection is created, updated or deleted, so a stale list cannot outlive an
+ * edit made from the admin panel.
+ */
+const SEARCH_ALL_CACHE_TTL_MS = 30_000
+const searchAllCache = new Map<string, { documents: Models.Document[]; at: number }>()
+
+const searchAllCacheKey = (collectionId: string, baseQueries: string[]) =>
+  `${collectionId}::${JSON.stringify(baseQueries)}`
+
+/**
+ * Drop every cached full read for a collection. Called automatically on any write through
+ * DatabaseService, and exported for writes that happen server-side in a Function (which never touch
+ * DatabaseService and so cannot self-invalidate).
+ */
+export function invalidateSearchAllCache(collectionId: string): void {
+  for (const key of searchAllCache.keys()) {
+    if (key.startsWith(`${collectionId}::`)) searchAllCache.delete(key)
+  }
+}
+
 // Generic database service functions
 export class DatabaseService {
   // Create a document
@@ -26,13 +56,15 @@ export class DatabaseService {
     collectionId: string,
     data: Omit<T, keyof Models.Document>
   ): Promise<T> {
-    return await databases.createDocument(
+    const created = await databases.createDocument(
       appwriteConfig.databaseId,
       collectionId,
       ID.unique(),
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       data as any
     ) as T
+    invalidateSearchAllCache(collectionId)
+    return created
   }
 
   // Get a document by ID
@@ -65,13 +97,15 @@ export class DatabaseService {
     documentId: string,
     data: Partial<Omit<T, keyof Models.Document>>
   ): Promise<T> {
-    return await databases.updateDocument(
+    const updated = await databases.updateDocument(
       appwriteConfig.databaseId,
       collectionId,
       documentId,
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       data as any
     ) as T
+    invalidateSearchAllCache(collectionId)
+    return updated
   }
 
   // Delete a document
@@ -84,6 +118,7 @@ export class DatabaseService {
       collectionId,
       documentId
     )
+    invalidateSearchAllCache(collectionId)
   }
 
   // Search documents (client-side filtering since full-text indexes may not be configured)
@@ -129,16 +164,27 @@ export class DatabaseService {
     searchFields: string[],
     baseQueries: string[] = []
   ): Promise<{ documents: T[]; total: number }> {
-    const all = await fetchAllPages<T>((cursor, limit) =>
-      this.list<T>(collectionId, [
-        ...baseQueries,
-        Query.limit(limit),
-        ...(cursor ? [Query.cursorAfter(cursor)] : []),
-      ])
-    )
+    // Reuse the last full read of this collection when only the search term changed — see
+    // searchAllCache above for why that dominated the cost of typing in a search box.
+    const cacheKey = searchAllCacheKey(collectionId, baseQueries)
+    const cached = searchAllCache.get(cacheKey)
+    let all: T[]
+    if (cached && Date.now() - cached.at < SEARCH_ALL_CACHE_TTL_MS) {
+      all = cached.documents as T[]
+    } else {
+      all = await fetchAllPages<T>((cursor, limit) =>
+        this.list<T>(collectionId, [
+          ...baseQueries,
+          Query.limit(limit),
+          ...(cursor ? [Query.cursorAfter(cursor)] : []),
+        ])
+      )
+      searchAllCache.set(cacheKey, { documents: all, at: Date.now() })
+    }
 
     const term = searchTerm.toLowerCase().trim()
-    if (!term) return { documents: all, total: all.length }
+    // Copy: the array may be the cached one, and callers are free to sort their result in place.
+    if (!term) return { documents: [...all], total: all.length }
 
     const filtered = all.filter((doc) =>
       searchFields.some((field) => {
@@ -335,26 +381,39 @@ export const clientsService = {
 
     return allClients
   },
-  // OPTIMIZATION: Batch fetch multiple clients by IDs
+  /**
+   * Resolve many clients by ID in as few requests as possible.
+   *
+   * This used to issue one getDocument per ID, so rendering the events list — which resolves a brand
+   * name for every visible event — fired one request per distinct client. A single
+   * Query.equal('$id', [...]) returns the whole batch in one round trip instead, which matters
+   * because each round trip to Appwrite Cloud costs ~0.5s regardless of how little it returns.
+   *
+   * Missing IDs are simply absent from the returned map, as before.
+   */
   getByIds: async (ids: string[]): Promise<Map<string, ClientDocument>> => {
     const clientsMap = new Map<string, ClientDocument>()
     if (ids.length === 0) return clientsMap
-    
+
+    // Appwrite rejects an equality query carrying more than 500 values; chunk well below that.
+    const CHUNK_SIZE = 100
+    const unique = [...new Set(ids)]
+
     try {
-      // Fetch all clients in parallel
-      const clientPromises = ids.map(id => DatabaseService.getById<ClientDocument>(appwriteConfig.collections.clients, id))
-      const clients = await Promise.all(clientPromises)
-      
-      // Build a map of clientId -> client for O(1) lookup
-      clients.forEach((client, index) => {
-        if (client) {
-          clientsMap.set(ids[index], client)
+      for (let i = 0; i < unique.length; i += CHUNK_SIZE) {
+        const chunk = unique.slice(i, i + CHUNK_SIZE)
+        const page = await DatabaseService.list<ClientDocument>(
+          appwriteConfig.collections.clients,
+          [Query.equal('$id', chunk), Query.limit(chunk.length)]
+        )
+        for (const client of page.documents) {
+          clientsMap.set(client.$id, client)
         }
-      })
+      }
     } catch (err) {
       console.error('Error fetching clients batch:', err)
     }
-    
+
     return clientsMap
   },
   update: (id: string, data: Partial<ClientFormData>) => {
@@ -864,6 +923,46 @@ export interface UserFormData {
   totalPoints?: number
 }
 
+/**
+ * Columns a user LIST screen actually renders, for Query.select.
+ *
+ * Without a select, every listed profile ships its `notifications` array — measured at ~3.2KB of a
+ * ~3.3KB average document, i.e. almost the entire payload, and up to 39KB on the largest profile.
+ * Fetching the whole collection cost 1.83MB before this list and 0.38MB after it. The omitted
+ * columns (`notifications`, `notificationPreferences`, `savedEventIds`, `favoriteIds`,
+ * `nearbyFavoriteNotifiedEventIds`) are per-user bookkeeping that no list column shows; the Edit
+ * modal re-reads the complete document via appUsersService.getById, so nothing downstream loses a
+ * field. Report exports deliberately do NOT use this — they read full documents.
+ *
+ * `$id` is required for cursor paging in fetchAllPages, and `$createdAt` backs the default sort.
+ */
+export const USER_PROFILE_LIST_FIELDS = [
+  '$id',
+  '$createdAt',
+  '$updatedAt',
+  'authID',
+  'firstname',
+  'lastname',
+  'username',
+  'phoneNumber',
+  'dob',
+  'avatarURL',
+  'isBlocked',
+  'zipCode',
+  'referalCode',
+  'referralCode',
+  'usedReferralCode',
+  'role',
+  'totalEvents',
+  'totalReviews',
+  'totalPoints',
+  'isAmbassador',
+  'isInfluencer',
+  'idAdult',
+  'tierLevel',
+  'triviasWon',
+] as const
+
 // App User interface (combines Auth user and user_profiles)
 export interface AppUser extends UserProfile {
   email?: string
@@ -873,8 +972,25 @@ export interface AppUser extends UserProfile {
   // Additional fields from Auth user can be added here
 }
 
-/** Batch size for get-user-emails to stay under Appwrite's 30s synchronous execution limit */
-const GET_USER_EMAILS_BATCH_SIZE = 25
+/**
+ * Auth IDs per get-user-emails execution.
+ *
+ * This was 25, which meant one Users-page search (emails are needed for every profile before the
+ * list can be filtered) fanned out to 27 executions for ~650 users. Measured in production that
+ * cost ~20s per search, and ~77s when the search was refined, because the endpoint resolved each ID
+ * with its own Auth round trip.
+ *
+ * Worse, it was losing data: the Statistics function's timeout is 15s, and 16% of those executions
+ * (97 of 596 sampled) died at ~15.3s with a 500. A failed execution yields no emails for its batch,
+ * so those users rendered with a blank email and last-login — and an email search could not find
+ * them at all.
+ *
+ * The endpoint now batches internally via users.list, so a much larger slice finishes in about a
+ * second — 250 IDs is 3 internal round trips there, leaving a wide margin under the 15s timeout.
+ * Raising this further is only safe alongside that batching; do not increase it without checking
+ * the function's configured timeout.
+ */
+const GET_USER_EMAILS_BATCH_SIZE = 250
 
 /**
  * Max get-user-emails executions to run concurrently. Bounds the fan-out so fetching emails for a
@@ -885,8 +1001,8 @@ const GET_USER_EMAILS_CONCURRENCY = 5
 
 /**
  * Fetches emails and last login dates for auth IDs in batches to avoid function timeout.
- * Each batch runs in a separate execution so no single call exceeds the 30s limit; batches are
- * run in bounded-concurrency groups so the total parallel fan-out stays capped.
+ * Each batch runs in a separate execution so no single call exceeds the function's timeout; batches
+ * are run in bounded-concurrency groups so the total parallel fan-out stays capped.
  */
 async function fetchUserEmailsInBatches(authIDs: string[]): Promise<{
   emailMap: Record<string, string>
@@ -1057,7 +1173,7 @@ export const appUsersService = {
     try {
       const profiles = await userProfilesService.list(queries)
       
-      // Fetch Auth user emails and last login dates via Cloud Function (batched to avoid 30s timeout)
+      // Fetch Auth user emails and last login dates via Cloud Function (batched to stay under the function timeout)
       const authIDs = profiles.documents
         .map((profile) => (profile as { authID?: string }).authID)
         .filter((id): id is string => !!id)
@@ -1150,7 +1266,7 @@ export const appUsersService = {
     try {
       const profiles = await userProfilesService.list(queries)
       
-      // Fetch Auth user emails and last login dates via Cloud Function (batched to avoid 30s timeout)
+      // Fetch Auth user emails and last login dates via Cloud Function (batched to stay under the function timeout)
       const authIDs = profiles.documents
         .map((profile) => (profile as { authID?: string }).authID)
         .filter((id): id is string => !!id)
@@ -1208,7 +1324,7 @@ export const appUsersService = {
         ])
       )
 
-      // Fetch Auth user emails and last login dates via Cloud Function (batched to avoid 30s timeout)
+      // Fetch Auth user emails and last login dates via Cloud Function (batched to stay under the function timeout)
       const authIDs = allProfiles
         .map((profile) => (profile as { authID?: string }).authID)
         .filter((id): id is string => !!id)
@@ -1381,7 +1497,7 @@ export const appUsersService = {
         queries
       )
       
-      // Fetch Auth user emails via Cloud Function (batched to avoid 30s timeout)
+      // Fetch Auth user emails via Cloud Function (batched to stay under the function timeout)
       const authIDs = result.documents
         .map((profile) => (profile as { authID?: string }).authID)
         .filter((id): id is string => !!id)
@@ -1956,6 +2072,11 @@ export const notificationsService = {
       if (!response.success) {
         throw new Error(response.error || 'Failed to send notification')
       }
+
+      // The Function stamps status/sentAt on the notification server-side, so nothing here went
+      // through DatabaseService. Drop the cached full read explicitly, or a search run in the next
+      // few seconds could still label this notification as Draft/Scheduled.
+      invalidateSearchAllCache(appwriteConfig.collections.notifications)
     } catch (error) {
       console.error('Error sending notification:', error)
       throw error
