@@ -796,6 +796,11 @@ const Users = () => {
           setUserToDelete(selectedUser)
           setIsDeleteModalOpen(true)
         }}
+        phoneVerified={
+          typeof (userForEdit ?? selectedUser)?.phoneVerified === 'boolean'
+            ? ((userForEdit ?? selectedUser)?.phoneVerified as boolean)
+            : undefined
+        }
         initialData={(() => {
           const u = userForEdit ?? selectedUser
           if (!u) return undefined

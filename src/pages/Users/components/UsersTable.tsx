@@ -8,6 +8,8 @@ interface User {
   lastName?: string
   username?: string
   phoneNumber?: string
+  /** undefined when the attribute has not been deployed/backfilled yet — shown as "—". */
+  phoneVerified?: boolean
   email?: string
   role?: string
   tierLevel?: string
@@ -115,6 +117,12 @@ const UsersTable = ({
               <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                 <div className="flex items-center gap-2">
                   <Icon icon="mdi:filter" className="w-4 h-4" />
+                  Phone Verified
+                </div>
+              </th>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                <div className="flex items-center gap-2">
+                  <Icon icon="mdi:filter" className="w-4 h-4" />
                   Email
                 </div>
               </th>
@@ -155,18 +163,18 @@ const UsersTable = ({
           </thead>
           <tbody className="bg-white divide-y divide-gray-200">
             {isLoading ? (
-              <TableLoadingState colSpan={11} />
+              <TableLoadingState colSpan={12} />
             ) : users.length === 0 ? (
               isFiltered ? (
                 <TableEmptyState
-                  colSpan={11}
+                  colSpan={12}
                   icon="mdi:magnify"
                   title="No results found"
                   description="Try adjusting your search or filters."
                 />
               ) : (
                 <TableEmptyState
-                  colSpan={11}
+                  colSpan={12}
                   icon="mdi:account-multiple-outline"
                   title="No users yet"
                   description="App users will appear here once they sign up."
@@ -190,6 +198,23 @@ const UsersTable = ({
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
                     {formatPhoneNumber(user.phoneNumber)}
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm">
+                    {user.phoneVerified === undefined ? (
+                      <span className="text-gray-400" title="Not deployed or not backfilled yet">
+                        -
+                      </span>
+                    ) : user.phoneVerified ? (
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
+                        <Icon icon="mdi:check-circle" className="w-3.5 h-3.5" />
+                        Verified
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-800">
+                        <Icon icon="mdi:alert-circle-outline" className="w-3.5 h-3.5" />
+                        Unverified
+                      </span>
+                    )}
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
                     {user.email || '-'}

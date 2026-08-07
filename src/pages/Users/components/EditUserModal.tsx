@@ -40,6 +40,13 @@ interface EditUserModalProps {
   isDeleteLoading?: boolean
   initialData?: UserData
   userId?: string
+  /**
+   * SMS phone-verification status, read-only. Deliberately NOT part of UserData:
+   * it is set by the mobile verification flow (or the grandfathering backfill),
+   * never by an admin, so it must stay out of formData, the unsaved-changes
+   * check, and the save payload. `undefined` = attribute not deployed/backfilled.
+   */
+  phoneVerified?: boolean
 }
 
 const EditUserModal = ({
@@ -51,6 +58,7 @@ const EditUserModal = ({
   isDeleteLoading = false,
   initialData,
   userId,
+  phoneVerified,
 }: EditUserModalProps) => {
   const [formData, setFormData] = useState<UserData>({
     image: null,
@@ -921,6 +929,30 @@ const EditUserModal = ({
                   type="text"
                   readOnly
                   value={formData.role === 'admin' ? 'Admin' : 'User'}
+                  className="w-full px-4 py-2 border border-gray-300 rounded-lg bg-gray-100 cursor-not-allowed focus:outline-none"
+                />
+              </div>
+
+              {/* Phone Verified (set by SMS verification or the backfill; not editable) */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Phone Verified
+                </label>
+                <input
+                  type="text"
+                  readOnly
+                  value={
+                    phoneVerified === undefined
+                      ? 'Unknown'
+                      : phoneVerified
+                        ? 'Yes'
+                        : 'No'
+                  }
+                  title={
+                    phoneVerified === undefined
+                      ? 'The phoneVerified attribute has not been deployed or backfilled yet.'
+                      : undefined
+                  }
                   className="w-full px-4 py-2 border border-gray-300 rounded-lg bg-gray-100 cursor-not-allowed focus:outline-none"
                 />
               </div>
