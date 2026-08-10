@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>SampleFinder: How to Fix the Rejected Twilio SMS Campaign</title>
+<style>
+  @page { size: A4; margin: 18mm 16mm 20mm 16mm; }
+
+  html { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+
+  body {
+    font-family: Helvetica, Arial, sans-serif;
+    font-size: 10.5pt;
+    line-height: 1.55;
+    color: #1a1a1a;
+    margin: 0;
+  }
+
+  h1 {
+    font-size: 21pt;
+    line-height: 1.2;
+    margin: 0 0 6px 0;
+    color: #1D0A74;
+  }
+  h2 {
+    font-size: 14pt;
+    margin: 26px 0 10px 0;
+    padding-bottom: 5px;
+    border-bottom: 2px solid #1D0A74;
+    color: #1D0A74;
+    page-break-after: avoid;
+  }
+  h3 {
+    font-size: 11.5pt;
+    margin: 18px 0 6px 0;
+    color: #1a1a1a;
+    page-break-after: avoid;
+  }
+
+  p { margin: 0 0 9px 0; }
+
+  .subtitle { font-size: 11pt; color: #555; margin: 0 0 18px 0; }
+
+  .meta {
+    border: 1px solid #ccc;
+    border-left: 4px solid #1D0A74;
+    padding: 10px 14px;
+    margin: 0 0 22px 0;
+    background: #f7f7fa;
+    font-size: 9.5pt;
+  }
+  .meta table { border-collapse: collapse; width: 100%; }
+  .meta td { padding: 2px 0; vertical-align: top; }
+  .meta td:first-child { width: 150px; color: #555; }
+
+  .callout {
+    border: 1px solid #d9d0a8;
+    background: #fdf9e9;
+    padding: 11px 14px;
+    margin: 12px 0;
+    font-size: 10pt;
+  }
+  .callout strong { color: #7a5c00; }
+
+  .critical {
+    border: 1px solid #e0b4b4;
+    background: #fcf0f0;
+    padding: 11px 14px;
+    margin: 12px 0;
+    font-size: 10pt;
+  }
+  .critical strong { color: #8a1f1f; }
+
+  .paste {
+    border: 1px solid #bbb;
+    background: #f4f4f6;
+    padding: 12px 14px;
+    margin: 10px 0 16px 0;
+    font-family: "Courier New", Courier, monospace;
+    font-size: 9pt;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+  }
+
+  .paste-label {
+    font-size: 9pt;
+    font-weight: bold;
+    color: #444;
+    margin: 14px 0 0 0;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  ol.steps { margin: 0 0 10px 0; padding-left: 0; counter-reset: step; list-style: none; }
+  ol.steps > li {
+    counter-increment: step;
+    position: relative;
+    padding-left: 34px;
+    margin-bottom: 11px;
+    page-break-inside: avoid;
+  }
+  ol.steps > li::before {
+    content: counter(step);
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 22px;
+    height: 22px;
+    line-height: 22px;
+    text-align: center;
+    background: #1D0A74;
+    color: #fff;
+    border-radius: 50%;
+    font-size: 9.5pt;
+    font-weight: bold;
+  }
+
+  ul.plain { margin: 0 0 10px 0; padding-left: 20px; }
+  ul.plain li { margin-bottom: 6px; }
+
+  ul.check { margin: 0 0 10px 0; padding-left: 0; list-style: none; }
+  ul.check li {
+    padding-left: 26px;
+    position: relative;
+    margin-bottom: 7px;
+  }
+  ul.check li::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 2px;
+    width: 12px;
+    height: 12px;
+    border: 1.5px solid #666;
+    border-radius: 2px;
+  }
+
+  .nav {
+    font-family: "Courier New", Courier, monospace;
+    background: #eceaf5;
+    padding: 1px 5px;
+    font-size: 9.5pt;
+    border-radius: 2px;
+  }
+
+  .ui { font-weight: bold; }
+
+  table.info { border-collapse: collapse; width: 100%; margin: 10px 0 16px 0; font-size: 9.5pt; }
+  table.info th, table.info td { border: 1px solid #ccc; padding: 7px 9px; text-align: left; vertical-align: top; }
+  table.info th { background: #eceaf5; font-weight: bold; }
+
+  .pagebreak { page-break-before: always; }
+
+  .footer-note {
+    margin-top: 26px;
+    padding-top: 10px;
+    border-top: 1px solid #ccc;
+    font-size: 9pt;
+    color: #666;
+  }
+
+  a { color: #1D0A74; word-break: break-all; }
+</style>
+</head>
+<body>
+
+<h1>How to Fix the Rejected SMS Campaign</h1>
+<p class="subtitle">SampleFinder text message verification: what Twilio rejected, and the steps to get it approved.</p>
+
+<div class="meta">
+<table>
+  <tr><td>Prepared for</td><td>SampleFinder by Polaris Brand Promotions</td></tr>
+  <tr><td>Date</td><td>10 August 2026</td></tr>
+  <tr><td>Campaign ID</td><td>QE2c6890da8086d771620e9b13fadeba0b</td></tr>
+  <tr><td>Current status</td><td>FAILED (rejected by the carrier registry)</td></tr>
+  <tr><td>Rejection code</td><td>30908, on the Message Flow field</td></tr>
+  <tr><td>Estimated effort</td><td>About 1 hour of work, then 1 to 3 weeks of review time</td></tr>
+</table>
+</div>
+
+<h2>1. Summary</h2>
+
+<p>The SampleFinder app needs to send a one-time code by text message so new users can confirm their phone number. Before any US business can send texts, the carriers require the messaging campaign to be registered and approved. Our registration was reviewed and rejected.</p>
+
+<p>The good news: your business identity (the Brand) is already <strong>approved</strong>. Only the campaign registration was rejected, and it can be corrected and resubmitted at no extra cost.</p>
+
+<p>There are two pieces of work, and they must happen in this order:</p>
+
+<table class="info">
+  <tr><th style="width:14%">Part</th><th style="width:46%">What needs to happen</th><th style="width:40%">Who does it</th></tr>
+  <tr>
+    <td><strong>Part A</strong></td>
+    <td>Correct the Terms and Conditions and Privacy Policy pages on samplefinder.com</td>
+    <td>Whoever maintains the website, with legal sign-off</td>
+  </tr>
+  <tr>
+    <td><strong>Part B</strong></td>
+    <td>Update and resubmit the campaign in the Twilio Console</td>
+    <td>Whoever has the Twilio account login</td>
+  </tr>
+</table>
+
+<div class="critical">
+<strong>Important:</strong> Do not start Part B until Part A is published and live on the website. The reviewers open your policy pages and read them. If the pages still contradict each other when they look, the campaign will be rejected a second time and you will wait through another full review cycle.
+</div>
+
+<h2>2. Why the campaign was rejected</h2>
+
+<p>Twilio returned error code 30908. That code means the reviewer could not accept the privacy policy attached to the registration. In our case there are two specific problems.</p>
+
+<h3>Problem 1: The Terms and the Privacy Policy disagree with each other</h3>
+
+<p>The two pages currently describe the use of customer phone numbers differently. When a reviewer finds two published documents that say different things, they cannot determine which one governs, so the registration is rejected. Twilio lists this explicitly as a cause: conflicting policies create ambiguity about which one applies.</p>
+
+<p>This is the main blocker. It is a wording problem on the website, not a problem with the app.</p>
+
+<h3>Problem 2: The registration was submitted before the URL requirement existed</h3>
+
+<p>Our campaign was created on 23 June 2026. On 30 June 2026, one week later, the carriers made the Privacy Policy and Terms of Service links <strong>mandatory</strong> fields on every campaign. Our submission predates that change, so it never carried those links. They must be added now.</p>
+
+<div class="pagebreak"></div>
+
+<h2>3. Part A: Update the website legal pages</h2>
+
+<p>These are the two pages under review. Both must be publicly reachable with no login and no password.</p>
+
+<ul class="plain">
+  <li><a href="https://samplefinder.com/terms-and-conditions/">https://samplefinder.com/terms-and-conditions/</a></li>
+  <li><a href="https://samplefinder.com/privacy-policy/">https://samplefinder.com/privacy-policy/</a></li>
+</ul>
+
+<h3>Step A1: Remove the contradiction</h3>
+
+<p>Read both pages side by side and make every statement about phone numbers, text messages and consent agree. Where they differ today, the Privacy Policy wording is the version to keep, because it is already close to what the carriers expect. A drafted amendment for the Terms page has been prepared and supplied separately alongside this document.</p>
+
+<h3>Step A2: Confirm the Privacy Policy contains all four required statements</h3>
+
+<p>Carriers require these four points to appear in the Privacy Policy. Check each one and add anything missing.</p>
+
+<ul class="check">
+  <li><strong>Non-sharing statement.</strong> The policy must say clearly that mobile phone numbers and text message consent are not shared with third parties for marketing purposes. This exact point is the single most common reason campaigns fail.</li>
+  <li><strong>What data is collected and why.</strong> A plain explanation of the customer information collected and how it is used.</li>
+  <li><strong>Message frequency.</strong> For SampleFinder this is one message per verification request.</li>
+  <li><strong>Rate disclosure.</strong> The sentence "Message and data rates may apply" must appear.</li>
+</ul>
+
+<p>If the non-sharing statement is missing, this wording is acceptable and can be pasted directly into the Privacy Policy:</p>
+
+<p class="paste-label">Suggested wording for the Privacy Policy</p>
+<div class="paste">Mobile phone numbers and text messaging consent are collected solely to verify your account and are never sold, rented, or shared with third parties for marketing or promotional purposes. Message frequency is one message per verification request. Message and data rates may apply.</div>
+
+<h3>Step A3: Verify the pages before moving on</h3>
+
+<ul class="check">
+  <li>Open both links in a private or incognito browser window. They must load without any login.</li>
+  <li>Confirm there is only one privacy policy published on the site. If an older copy exists at a different address, remove it or redirect it.</li>
+  <li>Confirm both pages load correctly on a mobile phone.</li>
+  <li>Confirm the two pages no longer contradict each other on phone numbers or messaging.</li>
+</ul>
+
+<div class="callout">
+<strong>Only continue to Part B once every box above is ticked.</strong> The reviewer will visit these pages during the review.
+</div>
+
+<div class="pagebreak"></div>
+
+<h2>4. Part B: Update the campaign in Twilio</h2>
+
+<p>You will need the login for the Twilio account that owns the SampleFinder messaging service.</p>
+
+<div class="callout">
+<strong>Edit the existing campaign. Do not delete it and create a new one.</strong> Twilio charges the vetting fee only once per campaign, and editing keeps that history. Deleting and recreating starts a fresh registration and can be charged again.
+</div>
+
+<ol class="steps">
+  <li>Open <a href="https://console.twilio.com">https://console.twilio.com</a> in your browser and sign in.</li>
+
+  <li>If your login has access to more than one Twilio account or project, use the account selector at the top of the page and choose the account used by SampleFinder. Getting this wrong is easy and everything after it will look empty.</li>
+
+  <li>In the left hand menu, click <span class="ui">Messaging</span>.</li>
+
+  <li>Under Messaging, click <span class="ui">Regulatory Compliance</span>.</li>
+
+  <li>Click <span class="ui">Campaigns</span>. The full navigation path is <span class="nav">Messaging &gt; Regulatory Compliance &gt; Campaigns</span>.</li>
+
+  <li>Find the campaign with the ID <strong>QE2c6890da8086d771620e9b13fadeba0b</strong>. Its status will read <strong>FAILED</strong>. Click the campaign name or the ID to open it.</li>
+
+  <li>On the Campaign Details page, read the rejection reason shown near the top so you can confirm it still says the privacy policy issue. Then click the blue <span class="ui">Edit Campaign</span> link.</li>
+
+  <li>A form opens. Find the field labelled <span class="ui">Message Flow</span>, sometimes shown as <span class="ui">Call to Action / Message Flow</span> or <span class="ui">How do end users consent to receive messages</span>. Delete everything currently in that field.</li>
+
+  <li>Copy the Message Flow text from section 6 of this document and paste it into that field. Paste it exactly as written, including both web links. Do not shorten it.</li>
+
+  <li>Scroll to the <span class="ui">Sample Messages</span> section. Confirm that at least two sample messages are present and that they match section 6 of this document. Replace or add them if they do not match.</li>
+
+  <li>Check the consent and opt-in checkboxes on the form. Confirm that the options describing subscriber opt-in, help message and opt-out are all ticked, since the SampleFinder app provides all three.</li>
+
+  <li>Review the whole form once more, then click <span class="ui">Update</span> to submit. The status will change to pending while the campaign is reviewed again.</li>
+</ol>
+
+<div class="callout">
+<strong>If you cannot find an Edit Campaign link,</strong> it usually means the campaign was registered under a different Twilio account, or the use case selected at creation cannot be edited. Contact the development team before deleting anything.
+</div>
+
+<div class="pagebreak"></div>
+
+<h2>5. Part C: After you submit</h2>
+
+<h3>What to expect</h3>
+
+<ul class="plain">
+  <li>Resubmitting starts a completely new review by the carrier registry. It is not a quick recheck.</li>
+  <li>Reviews commonly take a few business days and can take up to about three weeks.</li>
+  <li>There is no additional vetting fee for resubmitting the same campaign, and there is no limit on how many times a campaign may be resubmitted.</li>
+</ul>
+
+<h3>How to check the status</h3>
+
+<p>Return to <span class="nav">Messaging &gt; Regulatory Compliance &gt; Campaigns</span> at any time and look at the status column. You are waiting for it to change from pending to <strong>VERIFIED</strong> or <strong>APPROVED</strong>.</p>
+
+<p>Please tell the development team as soon as the status changes. Text message verification stays switched off in the live app until it is approved, so nothing changes for customers before then.</p>
+
+<h3>If it is rejected again</h3>
+
+<p>Open the campaign and read the new rejection code, then send the development team a screenshot of the Campaign Details page showing the code and the reason. A different code means a different problem, and each one has its own fix. Do not resubmit an unchanged campaign, because it will simply be rejected again.</p>
+
+<h2>6. Text to copy</h2>
+
+<p>These blocks are written to satisfy the carrier requirements. Please paste them exactly rather than rewriting them.</p>
+
+<p class="paste-label">Message Flow field (Part B, step 9)</p>
+<div class="paste">End users opt in inside the SampleFinder mobile app during account creation. On the sign up screen the user enters their own mobile number and ticks a consent checkbox that is unchecked by default. The checkbox reads: "I agree to receive a one-time verification code by text message from SampleFinder by Polaris Brand Promotions at the mobile number I provided. Message frequency: one message per verification request. Message and data rates may apply. Reply HELP for help or STOP to opt out." The account cannot be created unless the box is ticked. Consent is used only to send a one-time account verification code, never for marketing. Mobile numbers and consent are never shared with third parties for marketing purposes. Users may reply STOP at any time to opt out and HELP for assistance. Terms and Conditions: https://samplefinder.com/terms-and-conditions/ Privacy Policy: https://samplefinder.com/privacy-policy/</div>
+
+<p class="paste-label">Sample message 1 (Part B, step 10)</p>
+<div class="paste">SampleFinder: Your verification code is 123456. It expires in 15 minutes. Do not share this code. Reply HELP for help or STOP to opt out.</div>
+
+<p class="paste-label">Sample message 2 (Part B, step 10)</p>
+<div class="paste">SampleFinder: 654321 is your account verification code. It expires in 15 minutes. Reply HELP for help or STOP to opt out.</div>
+
+<div class="critical">
+<strong>Note for the development team:</strong> the sample messages above must match the SMS template configured in Appwrite. If the live template differs, update it so the wording sent to customers matches what was registered. A mismatch between registered samples and real traffic can cause carrier filtering later, even after approval.
+</div>
+
+<h2>7. Common questions</h2>
+
+<h3>Why can we not just start sending texts?</h3>
+<p>US mobile carriers block unregistered business text traffic. Without an approved campaign, verification codes are either silently dropped or rejected outright, so customers would never receive them.</p>
+
+<h3>Does this affect the live app today?</h3>
+<p>No. Phone verification is switched off in the released app and stays off until the campaign is approved. Customers are unaffected in the meantime.</p>
+
+<h3>Do we need to change the app?</h3>
+<p>No. The app already collects consent correctly, with an unchecked box, the required disclosure wording, and working HELP and STOP handling. All remaining work is on the website and in the Twilio Console.</p>
+
+<h3>Can we speed this up?</h3>
+<p>The review time is controlled by the carrier registry and cannot be expedited. The only real way to save time is to get Part A completely right before submitting, so a second rejection is avoided.</p>
+
+<div class="footer-note">
+Prepared by the SampleFinder development team. Questions about any step in this document, or about a new rejection code, can be sent to the development team with a screenshot of the Campaign Details page.
+</div>
+
+</body>
+</html>

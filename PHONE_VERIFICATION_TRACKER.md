@@ -91,6 +91,11 @@ requirement and was never given them.
 
 ### Steps to unblock, in order
 
+**Client handover document:** `legal/twilio-campaign-fix-guide.pdf` is a click-by-click
+guide written for the client, covering both the website fix and the Twilio Console
+resubmission. Source is `legal/twilio-campaign-fix-guide.html`; regenerate with
+`"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless --no-pdf-header-footer --print-to-pdf=... file://...`
+
 - [ ] **Legal publishes the Terms amendment** — draft at `legal/proposed-terms-sms-amendment.md`.
       **Blocking; nothing else proceeds.**
 - [ ] Resubmit the campaign with both URLs populated and a rewritten `message_flow`
@@ -109,6 +114,29 @@ OTP. Costs more at volume. Not currently pursued.
 ## 4. Awaiting QA (staging)
 
 Flag is on in staging. Code is complete; **none of this is human-verified yet.**
+
+**Build to test against: staging `1.0.13 (87)`, cut 2026-08-10 from `8253869`.**
+Android APK `SampleFinder-Staging-1.0.13-build87.apk` (99 MB, signed
+`CN=SampleFinder, Polaris Brand Promotions`); iOS archive
+`~/Library/Developer/Xcode/Archives/2026-08-10/SampleFinder-Staging-1.0.13-build87.xcarchive`.
+Both passed the env gate (staging Appwrite id present, prod id absent), so
+`PHONE_VERIFICATION_ENABLED=true` is inlined in both.
+
+> ⚠️ **Check SMS delivery before assuming it works or doesn't.** Verified 2026-08-10 against the
+> Twilio account in `samplefinder-admin/.env` (`ACcc70…c9a2`): the **message log is completely
+> empty — zero messages ever sent**. So no OTP has ever been delivered as a text from that
+> account, and a code seen during earlier testing most likely came from the Appwrite Console
+> (Messaging → Messages records the body even when delivery fails), not from a handset.
+>
+> Two open questions, both answerable in the Appwrite Console in about a minute:
+> 1. **Messaging → Providers** — which Twilio Account SID is configured, and is it enabled and
+>    default? If it is *not* `ACcc70…c9a2`, then §3's campaign status is about the wrong account.
+> 2. **Messaging → Messages** — do send attempts appear, and with what status/error?
+>
+> What is *not* in doubt: the only sender is a **US long code** (`+14845737822`) whose 10DLC
+> campaign is `FAILED`, so **US** recipients will be filtered by US carriers (expect `30034`).
+> A2P 10DLC is enforced by US carriers on US-terminating traffic only, so it does not by itself
+> explain success or failure when testing with a non-US number.
 
 - [ ] **Edit Profile → change phone.** Password prompt appears (no new-password field);
       wrong password errors inside the prompt and leaves the old number verified;
@@ -162,10 +190,28 @@ Do these in order, and only after the campaign is `VERIFIED`.
       backups existed. Deferred by request until SMS is done.
 - [ ] **No backup policy on either Appwrite project.** This is why the above was
       unrecoverable. Worth fixing before any further schema work.
-- [ ] **`Release-Staging` iOS build crashes** — `TypeError: undefined is not a function at
-      AppContainer`. Proven **pre-existing** at `9a05a18` by stashing all changes and
-      rebuilding clean. Unrelated to this feature, but it is the configuration
-      `release-staging` archives from.
+- [x] ~~**`Release-Staging` iOS build crashes** — `TypeError: undefined is not a function at
+      AppContainer`.~~ **No longer reproduces (2026-08-10).** Rebuilt `Release-Staging` at
+      `8253869` and ran it on the iPhone 17 simulator: the app launches and renders the login
+      screen, process stays alive, no crash report. Rendering that screen *is* `AppContainer`
+      mounting, which is exactly what used to fail.
+      **Likely cause of the original crash:** it was recorded before the Podfile
+      `'Release-Staging' => :release` mapping was added and `pod-install` re-run — the
+      `Pods-SampleFinder.release-staging.xcconfig` is dated 2026-08-10. The configuration is
+      now sound. Ruled out along the way, each with evidence: env-key gaps (staging is a
+      *superset* of prod, 21 vs 19 keys), build-setting divergence (only the 3 intended:
+      `APP_DISPLAY_NAME`, entitlements, bundle id), a missing staging GoogleService plist or
+      entitlements file, run-script ordering (it correctly runs after `Resources`), and RNFB's
+      `Core Configuration` phase overwriting the swap (it only writes `Info.plist`).
+- [ ] **`reactotron.ts` is untracked but imported by tracked code.** `App.tsx` has
+      `import './reactotron'`, yet `reactotron.ts` is gitignored — **a fresh clone or CI
+      checkout cannot build.** It survives locally only because the file exists on this
+      machine. Found 2026-08-10 while investigating the crash above; not the cause of it.
+- [ ] **Reactotron runs in release builds.** `reactotron.ts` calls
+      `.configure().useReactNative().connect()` at module scope with **no `__DEV__` guard**,
+      and `reactotron-react-native` is a **devDependency**. Every production bundle ships it
+      and attempts a `localhost` socket connect on launch. Present since 2025-12-03 and prod
+      has shipped with it, so it is not urgent — but it breaks the moment dev deps are pruned.
 - [ ] **`.env` is tracked in the app repo** despite being in `.gitignore` (ignore rules do
       not apply to already-tracked files). It contradicts the CLAUDE.md rule that env files
       are not committed. Consider `git rm --cached .env`. The local copy currently has
