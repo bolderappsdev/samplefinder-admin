@@ -7,6 +7,8 @@ const REVIEWS_TABLE_ID = 'reviews';
 const TRIVIA_TABLE_ID = 'trivia';
 const CHECKINS_TABLE_ID = 'checkins';
 const NOTIFICATIONS_TABLE_ID = 'notifications';
+const POPUPS_TABLE_ID = 'popups';
+const POPUP_INTERACTIONS_TABLE_ID = 'popup_interactions';
 // Tier thresholds
 const TIER_THRESHOLDS = [
     { level: 5, name: 'SampleMaster', minPoints: 100000 },
@@ -287,6 +289,149 @@ async function getTriviaStats(databases, log) {
         throw error;
     }
 }
+/**
+ * Get Popups list statistics (counts by schedule status), mirroring getTriviaStats.
+ */
+async function getPopupsStats(databases, log) {
+    try {
+        const nowISO = new Date().toISOString();
+        const [totalResponse, scheduledResponse, activeResponse, completedResponse] = await Promise.all([
+            databases.listDocuments(DATABASE_ID, POPUPS_TABLE_ID),
+            databases.listDocuments(DATABASE_ID, POPUPS_TABLE_ID, [
+                Query.greaterThan('startDate', nowISO),
+            ]),
+            databases.listDocuments(DATABASE_ID, POPUPS_TABLE_ID, [
+                Query.lessThanEqual('startDate', nowISO),
+                Query.greaterThanEqual('endDate', nowISO),
+            ]),
+            databases.listDocuments(DATABASE_ID, POPUPS_TABLE_ID, [
+                Query.lessThan('endDate', nowISO),
+            ]),
+        ]);
+        return {
+            totalPopups: totalResponse.total,
+            scheduled: scheduledResponse.total,
+            active: activeResponse.total,
+            completed: completedResponse.total,
+        };
+    }
+    catch (error) {
+        log(`Error getting popups stats: ${error.message}`);
+        throw error;
+    }
+}
+/**
+ * Per-popup detail stats aggregated from popup_interactions rows (cursor-paginated).
+ * uniqueClickers/clickers21Plus dedupe by user; ctr = uniqueClickers / uniqueUsersShown.
+ */
+async function getPopupDetailStats(databases, popupId, log) {
+    const PAGE_SIZE = 500;
+    /** Hard cap on rows returned to the admin, so a long campaign can't blow up the response. */
+    const VIEWER_CAP = 1000;
+    const PROFILE_LOOKUP_CHUNK_SIZE = 100;
+    const shownUsers = new Set();
+    const clickedUsers = new Set();
+    const clickers21Plus = new Set();
+    const viewerRows = [];
+    let totalImpressions = 0;
+    let cursor;
+    try {
+        for (;;) {
+            // Newest first, so the VIEWER_CAP below keeps the most RECENT rows.
+            // Walking ascending and stopping at the cap would keep the oldest, which
+            // is the opposite of what the admin table says it is showing.
+            const queries = [
+                Query.equal('popup', popupId),
+                Query.orderDesc('$createdAt'),
+                Query.limit(PAGE_SIZE),
+            ];
+            if (cursor) {
+                queries.push(Query.cursorAfter(cursor));
+            }
+            const page = await databases.listDocuments(DATABASE_ID, POPUP_INTERACTIONS_TABLE_ID, queries);
+            for (const row of page.documents) {
+                totalImpressions++;
+                const userRef = row.user;
+                const userId = typeof userRef === 'string' ? userRef : userRef?.$id;
+                if (!userId)
+                    continue;
+                shownUsers.add(userId);
+                if (row.clicked === true) {
+                    clickedUsers.add(userId);
+                    if (row.is21Plus === true) {
+                        clickers21Plus.add(userId);
+                    }
+                }
+                if (viewerRows.length < VIEWER_CAP) {
+                    viewerRows.push({
+                        userId,
+                        shownAt: row.shownAt ?? null,
+                        clickedAt: row.clickedAt ?? null,
+                        is21Plus: row.is21Plus === true,
+                    });
+                }
+            }
+            if (page.documents.length < PAGE_SIZE)
+                break;
+            cursor = page.documents[page.documents.length - 1].$id;
+        }
+        const uniqueUsersShown = shownUsers.size;
+        const uniqueClickers = clickedUsers.size;
+        const ctr = uniqueUsersShown > 0
+            ? Math.round((uniqueClickers / uniqueUsersShown) * 10000) / 10000
+            : 0;
+        // Resolve display names in batches rather than one read per row.
+        const profileIds = Array.from(new Set(viewerRows.map((r) => r.userId)));
+        const profileMap = new Map();
+        for (let i = 0; i < profileIds.length; i += PROFILE_LOOKUP_CHUNK_SIZE) {
+            const chunk = profileIds.slice(i, i + PROFILE_LOOKUP_CHUNK_SIZE);
+            try {
+                const page = await databases.listDocuments(DATABASE_ID, USER_PROFILES_TABLE_ID, [
+                    Query.equal('$id', chunk),
+                    Query.limit(chunk.length),
+                ]);
+                for (const doc of page.documents) {
+                    profileMap.set(doc.$id, {
+                        name: [doc.firstname, doc.lastname].filter(Boolean).join(' ').trim(),
+                        username: doc.username ?? '',
+                    });
+                }
+            }
+            catch (err) {
+                // A bad id rejects the whole chunk; the rows still render by id below.
+                log(`Popup viewer profile batch failed for ${chunk.length} ids: ${err.message}`);
+            }
+        }
+        const viewers = viewerRows
+            .map((r) => {
+            const profile = profileMap.get(r.userId);
+            return {
+                userId: r.userId,
+                // A deleted profile still gets a row — falling back to the id beats
+                // dropping the impression from the report entirely.
+                name: profile?.name || profile?.username || r.userId,
+                username: profile?.username ?? '',
+                shownAt: r.shownAt,
+                clickedAt: r.clickedAt,
+                is21Plus: r.is21Plus,
+            };
+        })
+            .sort((a, b) => (b.shownAt ?? '').localeCompare(a.shownAt ?? ''));
+        return {
+            totalImpressions,
+            uniqueUsersShown,
+            uniqueClickers,
+            clickers21Plus: clickers21Plus.size,
+            ctr,
+            viewers,
+            viewersTruncated: viewerRows.length >= VIEWER_CAP,
+        };
+    }
+    catch (error) {
+        log(`Error getting popup detail stats for ${popupId}: ${error.message}`);
+        throw error;
+    }
+}
 // Main function handler
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export default async function handler({ req, res, log, error }) {
@@ -328,7 +473,7 @@ export default async function handler({ req, res, log, error }) {
             if (!body || !body.page) {
                 return res.json({
                     success: false,
-                    error: 'page parameter is required. Valid values: dashboard, clients, users, notifications, trivia',
+                    error: 'page parameter is required. Valid values: dashboard, clients, users, notifications, trivia, popups',
                 }, 400);
             }
             const validPages = [
@@ -337,6 +482,7 @@ export default async function handler({ req, res, log, error }) {
                 'users',
                 'notifications',
                 'trivia',
+                'popups',
             ];
             if (!validPages.includes(body.page)) {
                 return res.json({
@@ -362,6 +508,11 @@ export default async function handler({ req, res, log, error }) {
                     break;
                 case 'trivia':
                     statistics = await getTriviaStats(databases, log);
+                    break;
+                case 'popups':
+                    statistics = body.popupId
+                        ? await getPopupDetailStats(databases, String(body.popupId), log)
+                        : await getPopupsStats(databases, log);
                     break;
                 default:
                     return res.json({
@@ -591,7 +742,7 @@ export default async function handler({ req, res, log, error }) {
         // Default response
         return res.json({
             success: false,
-            error: 'Invalid endpoint. Use POST /get-statistics with { "page": "dashboard|clients|users|notifications|trivia" }',
+            error: 'Invalid endpoint. Use POST /get-statistics with { "page": "dashboard|clients|users|notifications|trivia|popups" }',
         });
     }
     catch (err) {
